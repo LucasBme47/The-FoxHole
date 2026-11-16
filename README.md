@@ -66,6 +66,7 @@ Everything is in [`pi/`](pi/). The setup scripts expect this folder copied to `/
 | `suricata-disable.conf` | `/etc/suricata/disable.conf` | Rules switched off (Syncro RMM, Splashtop) |
 | `foxhole_triage.py` | `/usr/local/lib/foxhole/` | Triage service |
 | `suricata-triage.env.example` | `/etc/suricata-triage.env` | Template for mail and AbuseIPDB credentials |
+| `pihole-exporter.env.example` | `/etc/pihole-exporter.env` | Template for the Pi-hole exporter's password |
 | `ignore-*.txt` | `/etc/foxhole/` | Signatures, domains and addresses never emailed about |
 | `llm_proxy.py` | `/usr/local/lib/foxhole/` | Relay in front of hailo-ollama |
 | `docker-compose.yml` | `/opt/open-webui/` | Open WebUI |
@@ -76,21 +77,31 @@ Everything is in [`pi/`](pi/). The setup scripts expect this folder copied to `/
 | `setup-triage.sh` | run once | Installs the triage service, dashboard switch and Samba share |
 | `configs/` | see each file's header | Prometheus, Loki, Promtail, Grafana and systemd unit files |
 
-## Build order
+## Installing
 
-The scripts cover part of the build. The rest was done by hand and is listed here so you know what is missing.
+**[INSTALL.md](INSTALL.md) has the full step-by-step commands.** In outline:
 
-1. Install Raspberry Pi OS, set up key-only SSH, and give `eth1` the static address 10.0.0.1/24.
-2. Install Suricata, nftables, Samba, Prometheus and node exporter from the Debian repositories.
-3. Install Pi-hole v6: listen on `eth1` only, enable DHCP, and move its web page to port 8080.
-4. Install Hailo's software for the AI HAT+ 2 and hailo-ollama, then pull `qwen2.5-instruct:1.5b`.
-5. Edit the example addresses and names in `pi/` to match your network.
-6. Copy `pi/` to `/tmp/foxhole` on the Pi and run `setup-suricata.sh`, `setup-monitoring.sh`, then `setup-triage.sh` with sudo.
-7. Create `/etc/suricata-triage.env` from the example file, and `/etc/pihole-exporter.env` for pihole-exporter (its Pi-hole password setting; see that project's documentation).
-8. Install `llm_proxy.py` and `configs/foxhole-llm-proxy.service`, then enable the service.
-9. Install Docker, set `"iptables": false` in `/etc/docker/daemon.json` so Docker does not rewrite the firewall, and start Open WebUI with `docker compose up -d`.
-10. Check and load the firewall: `sudo nft -c -f /etc/nftables.conf`, then `sudo nft -f /etc/nftables.conf`. Do this from a session you cannot lock yourself out of.
-11. Move the wired computers behind the Pi.
+1. Edit the example addresses and names in `pi/` to match your network.
+2. Install the Debian packages and set up the two network ports.
+3. Install Pi-hole, then Suricata (`setup-suricata.sh`).
+4. Install Hailo's software, hailo-ollama, the model and the relay.
+5. Install monitoring (`setup-monitoring.sh`), the triage service (`setup-triage.sh`) and Open WebUI.
+6. Load the firewall last, then move the wired computers behind the Pi.
+
+### Where the addresses live
+
+There is no single settings file yet. If you change an address or a device, change it in every place listed:
+
+| Value | Files that contain it |
+|---|---|
+| LAN network (10.0.0.0/24) | `foxhole_triage.py` (`HOME_NET`), `setup-suricata.sh` (`HOME_NET`), Pi-hole DHCP settings |
+| Router / Wi-Fi network (192.168.0.0/24) | `nftables.conf` (`WIFI_NET`), `local.rules` |
+| AdminPC (10.0.0.2) | `nftables.conf` (`LAPTOP`), `foxhole_triage.py` (`DEVICES`, `AUTOBLOCK_EXEMPT_IPS`), Pi-hole DHCP settings |
+| GameServer (10.0.0.18) | `nftables.conf` (`GAMESRV`), `local.rules`, `foxhole_triage.py` (`DEVICES`), Pi-hole DHCP settings |
+| DashboardPC (10.0.0.20) | `nftables.conf` (`DASH`), `dashboard-internet`, `foxhole_triage.py` (`DEVICES`), Pi-hole DHCP settings |
+| Pi login name | `011_foxhole-scoped`, `setup-triage.sh`, the `hailo-ollama` service file |
+
+Moving these into one file is a welcome contribution; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Everyday commands
 
@@ -99,12 +110,13 @@ The scripts cover part of the build. The rest was done by hand and is listed her
 | Give DashboardPC internet for updates | `sudo dashboard-internet on` |
 | Take it away again | `sudo dashboard-internet off` |
 | Watch the triage service | `soc` |
-| Send a test email | `sudo /usr/local/lib/foxhole/foxhole_triage.py --test-email` |
+| Send a test email | See step 11 of [INSTALL.md](INSTALL.md) |
 | Reload Suricata rules | `sudo systemctl reload suricata` |
 | Unblock an address | `sudo nft delete element inet filter BLOCKED_IPS { ADDRESS }` |
 
 ## Known limits
 
+- **Addresses are repeated across several files.** See "Where the addresses live" above.
 - **Fail-closed.** If Suricata is down, the wired computers have no internet.
 - **Same-switch traffic is not inspected.** Traffic between two wired computers never passes the Pi.
 - **AbuseIPDB false positives.** Scores belong to addresses, and cloud addresses are shared. Use the ignore lists.
@@ -112,6 +124,10 @@ The scripts cover part of the build. The rest was done by hand and is listed her
 - **Small model.** `llama3.2:3b` was tried and was too slow on this hardware (minutes to load and answer).
 - **The Wi-Fi Minecraft forward is untested.** The rules load and validate, but no Wi-Fi client was available to try it.
 - **AbuseIPDB's free plan** has its own usage terms; check them before using this anywhere but home.
+
+## Contributing
+
+Questions, bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 
