@@ -1,0 +1,11 @@
+# Grafana dashboard provider — loads JSON dashboards from disk
+# Deploy to: /etc/grafana/provisioning/dashboards/foxhole.yaml
+apiVersion: 1
+
+providers:
+  - name: foxhole
+    folder: ""
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

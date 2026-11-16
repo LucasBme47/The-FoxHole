@@ -1,0 +1,14 @@
+# Systemd unit for pihole-exporter (binary install)
+# Deploy to: /etc/systemd/system/pihole-exporter.service on Pi
+[Unit]
+Description=Pi-hole Prometheus exporter
+After=network.target
+
+[Service]
+DynamicUser=yes
+EnvironmentFile=/etc/pihole-exporter.env
+ExecStart=/usr/local/bin/pihole_exporter -bind_addr 127.0.0.1
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

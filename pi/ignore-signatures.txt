@@ -1,0 +1,21 @@
+# /etc/foxhole/ignore-signatures.txt
+# One entry per line. If the text appears anywhere in a Suricata rule name
+# (upper/lower case does not matter), the alert is logged but never sent to the
+# AI or emailed.
+# After editing:  sudo systemctl restart foxhole-triage
+
+# --- Syncro RMM and its Splashtop remote-control engine (installed on purpose) ---
+SyncroMSP
+syncromsp
+kabutoservices
+repairshopr
+Splashtop
+
+# --- Known-benign noise carried over from the previous build ---
+ET INFO Microsoft Connection Test
+SURICATA STREAM excessive retransmissions
+SURICATA STREAM Packet with invalid timestamp
+ET INFO Session Traversal Utilities for NAT (STUN Binding Request On Non-Standard High Port)
+ET INFO Dropbox.com Offsite File Backup in Use
+ET USER_AGENTS Steam HTTP Client User-Agent
+ET INFO Packed Executable Download

@@ -1,0 +1,32 @@
+# Scoped passwordless sudo for FoxHole operations.
+# Replace YOUR_PI_USER (last line) with your login name on the Pi, then install with:
+#   sudo visudo -c -f 011_foxhole-scoped && sudo install -m 440 011_foxhole-scoped /etc/sudoers.d/
+# Full sudo remains available WITH a password via the sudo group.
+#
+# Deliberately NOT passwordless:
+#  - systemctl status/edit (status pages through less as root -> shell escape;
+#    status works unprivileged anyway)
+#  - file writes (cp/tee/editors) - config changes require the password
+#  - package management, user management, everything else
+
+Cmnd_Alias FH_SERVICES = /usr/bin/systemctl start *, \
+                         /usr/bin/systemctl stop *, \
+                         /usr/bin/systemctl restart *, \
+                         /usr/bin/systemctl reload *, \
+                         /usr/bin/systemctl try-reload-or-restart *, \
+                         /usr/bin/systemctl daemon-reload
+
+Cmnd_Alias FH_NFT = /usr/sbin/nft -f /etc/nftables.conf, \
+                    /usr/sbin/nft -c -f *, \
+                    /usr/sbin/nft list *, \
+                    /usr/sbin/nft add element *, \
+                    /usr/sbin/nft delete element *
+
+Cmnd_Alias FH_DIAG = /usr/bin/ss -tlnp, \
+                     /usr/sbin/ss -tlnp
+
+Cmnd_Alias FH_DASH = /usr/local/sbin/dashboard-internet on, \
+                     /usr/local/sbin/dashboard-internet off, \
+                     /usr/local/sbin/dashboard-internet status
+
+YOUR_PI_USER ALL=(root) NOPASSWD: FH_SERVICES, FH_NFT, FH_DIAG, FH_DASH

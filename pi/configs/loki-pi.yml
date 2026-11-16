@@ -1,0 +1,53 @@
+# Loki config for Raspberry Pi (binary install, single-node)
+# Deploy to: /etc/loki/config.yml on Pi
+# Runs as the `loki` system user; data lives under /var/lib/loki on the SSD.
+#
+# Carries forward the tuning learned on the old Ubuntu Server deployment:
+# - ingestion limits raised from the 4MB/s default so Promtail catch-up
+#   bursts don't 429
+# - log_level warn: at info level Loki logs a fat stats line for every
+#   query it serves, which once flooded syslog at ~65MB/day
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /var/lib/loki
+  storage:
+    filesystem:
+      chunks_directory: /var/lib/loki/chunks
+      rules_directory: /var/lib/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: "2026-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32
+  # 14-day retention. Enforced by the compactor below.
+  retention_period: 336h
+
+compactor:
+  working_directory: /var/lib/loki/compactor
+  retention_enabled: true
+  retention_delete_delay: 2h
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false

@@ -1,0 +1,19 @@
+# /etc/foxhole/ignore-domains.txt
+# One domain per line. The domain and every sub-domain of it are never emailed
+# about, even if AbuseIPDB scores the address badly. (Still written to the logs.)
+# After editing:  sudo systemctl restart foxhole-triage
+
+# --- Syncro RMM (from Syncro's "Exceptions and Allowlists" documentation) ---
+syncromsp.com
+syncroapi.com
+kabutoservices.com
+repairshopr.com
+aurelius.host
+
+# --- Firefox notification service. Runs on shared Google Cloud addresses that
+#     AbuseIPDB scores badly (a false positive seen during the build) ---
+push.services.mozilla.com
+
+# --- Splashtop (remote-control engine used by Syncro) ---
+splashtop.com
+splashtop.eu

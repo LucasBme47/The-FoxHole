@@ -1,0 +1,37 @@
+# TheFoxHole V3 - Open WebUI (chat front end for the LLM on the Hailo NPU)
+# Lives at /opt/open-webui/docker-compose.yml on the Pi.
+# Start/refresh:  cd /opt/open-webui && sudo docker compose up -d
+# Update image:   cd /opt/open-webui && sudo docker compose pull && sudo docker compose up -d
+# Logs:           sudo docker logs open-webui -f
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    # Host networking: reaches hailo-ollama on 127.0.0.1:8000 and needs no Docker firewall rules.
+    network_mode: host
+    restart: always
+    environment:
+      # 8001 = the FoxHole LLM relay (foxhole-llm-proxy), which cleans up requests that
+      # hailo-ollama (port 8000) would reject and makes them take turns on the NPU.
+      - OLLAMA_BASE_URL=http://127.0.0.1:8001
+      - PORT=8081            # 8080 is the Pi-hole admin page
+      # The Hailo NPU answers ONE request at a time. Open WebUI normally fires extra
+      # background requests per chat (title, tags, follow-ups, autocomplete), which collide
+      # with the real answer and cause "Server Connection Error". Turn them all off.
+      - ENABLE_TITLE_GENERATION=false
+      - ENABLE_TAGS_GENERATION=false
+      - ENABLE_FOLLOW_UP_GENERATION=false
+      - ENABLE_AUTOCOMPLETE_GENERATION=false
+      - ENABLE_SEARCH_QUERY_GENERATION=false
+      - ENABLE_RETRIEVAL_QUERY_GENERATION=false
+      # Make the settings above win over anything saved earlier in the web UI.
+      - ENABLE_PERSISTENT_CONFIG=false
+      # Only an Ollama-style backend exists here; skip the OpenAI connection probe.
+      - ENABLE_OPENAI_API=false
+      # Wait up to 5 minutes for an answer (model load on the NPU takes ~40 s).
+      - AIOHTTP_CLIENT_TIMEOUT=300
+    volumes:
+      - open-webui:/app/backend/data
+
+volumes:
+  open-webui:

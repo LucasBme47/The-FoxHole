@@ -1,0 +1,7 @@
+# /etc/foxhole/ignore-ips.txt
+# One IP address or range (CIDR, e.g. 203.0.113.0/24) per line. These addresses
+# are never emailed about. (Still written to the logs.)
+# After editing:  sudo systemctl restart foxhole-triage
+
+# Dropbox CDN - client sync traffic (carried over from the previous build)
+162.125.8.18

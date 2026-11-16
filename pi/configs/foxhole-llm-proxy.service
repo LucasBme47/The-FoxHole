@@ -1,0 +1,14 @@
+# Deploy to: /etc/systemd/system/foxhole-llm-proxy.service on the Pi
+[Unit]
+Description=FoxHole LLM relay (cleans requests for hailo-ollama, one at a time on the NPU)
+After=hailo-ollama.service
+Wants=hailo-ollama.service
+
+[Service]
+DynamicUser=yes
+ExecStart=/usr/bin/python3 -u /usr/local/lib/foxhole/llm_proxy.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

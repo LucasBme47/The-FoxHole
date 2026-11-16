@@ -1,0 +1,13 @@
+# Systemd unit for Loki (binary install — no apt package provides one)
+# Deploy to: /etc/systemd/system/loki.service on Pi
+[Unit]
+Description=Loki log aggregation
+After=network.target
+
+[Service]
+User=loki
+ExecStart=/usr/local/bin/loki -config.file=/etc/loki/config.yml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

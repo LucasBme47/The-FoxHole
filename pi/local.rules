@@ -1,0 +1,43 @@
+# Custom Suricata rules for TheFoxHole V3
+# Deploy to: /etc/suricata/rules/local.rules on the Pi (one rule per line, never paste via nano)
+#
+# Referenced by ABSOLUTE PATH in /etc/suricata/suricata.yaml:
+#   rule-files:
+#     - suricata.rules
+#     - /etc/suricata/rules/local.rules
+#
+# Reload without restart: sudo kill -USR2 $(pidof suricata)
+# Verify:  sudo grep "rule files processed" /var/log/suricata/suricata.log | tail -1
+#          Expect "2 rule files processed" and "0 rules failed".
+
+# ---------------------------------------------------------------------------
+# SSH brute force (carried over from the previous build)
+# ---------------------------------------------------------------------------
+alert tcp any any -> $HOME_NET 22 (msg:"LOCAL SSH Brute Force - Connection Threshold"; flags:S; threshold:type threshold, track by_src, count 10, seconds 60; classtype:attempted-admin; priority:1; sid:9000001; rev:1;)
+alert tcp any any -> $HOME_NET 22 (msg:"LOCAL SSH Hydra Brute Force Tool Detected"; flow:established,to_server; content:"SSH-2.0-libssh"; nocase; classtype:attempted-admin; priority:1; sid:9000003; rev:1;)
+alert tcp any any -> $HOME_NET 22 (msg:"LOCAL SSH Connection Burst - Slow Brute Force"; flags:S; threshold:type both, track by_src, count 20, seconds 120; classtype:attempted-admin; priority:1; sid:9000004; rev:1;)
+
+# ---------------------------------------------------------------------------
+# Minecraft (server on GameServer 10.0.0.18, HOME NETWORK ONLY)
+#
+# Note: computers in the house reach the server straight through the switch,
+# so that traffic never passes the Pi and Suricata cannot see it. These rules
+# watch the part the Pi DOES see: anything Minecraft-shaped crossing to or
+# from the internet.
+# ---------------------------------------------------------------------------
+# The server must never answer a client on the internet. If these fire, something
+# has opened the server to the outside (priority 1 = emailed).
+# (192.168.0.0/24 is excluded: in-house Wi-Fi devices are allowed to play.)
+alert tcp 10.0.0.18 25565 -> [$EXTERNAL_NET,!192.168.0.0/24] any (msg:"LOCAL MINECRAFT GameServer Java server answering an internet client - server should be home-network only"; flow:established,from_server; threshold:type limit, track by_dst, count 1, seconds 600; classtype:policy-violation; priority:1; sid:9000012; rev:2;)
+alert udp 10.0.0.18 19132 -> [$EXTERNAL_NET,!192.168.0.0/24] any (msg:"LOCAL MINECRAFT GameServer Bedrock server answering an internet client - server should be home-network only"; threshold:type limit, track by_dst, count 1, seconds 600; classtype:policy-violation; priority:1; sid:9000013; rev:2;)
+alert tcp 10.0.0.18 25575 -> $EXTERNAL_NET any (msg:"LOCAL MINECRAFT GameServer RCON admin port answering an internet client"; flow:established,from_server; threshold:type limit, track by_dst, count 1, seconds 600; classtype:policy-violation; priority:1; sid:9000014; rev:1;)
+
+# An in-house Wi-Fi device joining the server (informational, logged only).
+alert tcp 192.168.0.0/24 any -> 10.0.0.18 25565 (msg:"LOCAL MINECRAFT In-house Wi-Fi device joined the Java server on GameServer"; flags:S; threshold:type limit, track by_src, count 1, seconds 3600; classtype:not-suspicious; priority:3; sid:9000015; rev:1;)
+alert udp 192.168.0.0/24 any -> 10.0.0.18 19132 (msg:"LOCAL MINECRAFT In-house Wi-Fi device joined the Bedrock server on GameServer"; threshold:type limit, track by_src, count 1, seconds 3600; classtype:not-suspicious; priority:3; sid:9000016; rev:1;)
+
+# A home computer joining a Minecraft server out on the internet. Informational
+# (priority 3 = logged, not emailed) - but the triage daemon still checks the
+# server's address against AbuseIPDB and emails if it is a known-bad address.
+alert tcp $HOME_NET any -> $EXTERNAL_NET 25565 (msg:"LOCAL MINECRAFT Home computer connecting to an internet Java server"; flags:S; threshold:type limit, track by_src, count 1, seconds 3600; classtype:policy-violation; priority:3; sid:9000010; rev:1;)
+alert udp $HOME_NET any -> $EXTERNAL_NET 19132 (msg:"LOCAL MINECRAFT Home computer connecting to an internet Bedrock server"; threshold:type limit, track by_src, count 1, seconds 3600; classtype:policy-violation; priority:3; sid:9000011; rev:1;)

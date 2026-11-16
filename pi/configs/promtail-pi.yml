@@ -1,0 +1,56 @@
+# Promtail config for Raspberry Pi
+# Deploy to: /etc/promtail/config.yml on Pi
+# Ships fail2ban.log, Suricata eve.json, and SSH journal events to Loki,
+# which runs locally on the Pi. (fail2ban is optional; the job is harmless without it.)
+#
+# Debian Trixie has no /var/log/auth.log or /var/log/syslog — the Pi uses
+# systemd-journald. SSH auth events are scraped from the journal instead.
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+positions:
+  # Must NOT live in /tmp — that is wiped on reboot, causing Promtail to
+  # re-ship the current eve.json from byte 0 (duplicate lines in Loki).
+  filename: /var/lib/promtail/positions-pi.yaml
+clients:
+  - url: http://localhost:3100/loki/api/v1/push
+scrape_configs:
+  - job_name: fail2ban
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: fail2ban
+          host: pi
+          __path__: /var/log/fail2ban.log
+  - job_name: suricata
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: suricata
+          host: pi
+          __path__: /var/log/suricata/eve.json
+    pipeline_stages:
+      # Drop Suricata's periodic stats blobs (multi-KB JSON every ~15s with
+      # no alerting value) so they don't bloat Loki. Alerts, flows, DNS,
+      # TLS, etc. all still ship.
+      - json:
+          expressions:
+            event_type: event_type
+      - drop:
+          source: event_type
+          value: stats
+  - job_name: sshd
+    journal:
+      max_age: 12h
+      labels:
+        job: sshd
+        host: pi
+    relabel_configs:
+      # Keep only the SSH daemon's journal entries (unit is ssh.service on
+      # Debian; sshd.service on some distros)
+      - source_labels: ['__journal__systemd_unit']
+        regex: ssh(d)?\.service
+        action: keep
+      - source_labels: ['__journal__systemd_unit']
+        target_label: unit

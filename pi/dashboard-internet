@@ -1,0 +1,33 @@
+#!/bin/bash
+# dashboard-internet - turn internet access for the Dashboard Viewer on or off.
+#
+#   sudo dashboard-internet on       allow DashboardPC (10.0.0.20) out to the internet
+#   sudo dashboard-internet off      block it again (the normal state)
+#   sudo dashboard-internet status   show the current state
+#
+# "on" lasts until you run "off". A Pi reboot or firewall reload also returns it to off.
+DASH=10.0.0.20
+SET="inet filter DASH_INTERNET"
+
+is_on() { /usr/sbin/nft list set $SET 2>/dev/null | grep -q "$DASH"; }
+
+case "${1:-status}" in
+  on)
+    /usr/sbin/nft add element $SET "{ $DASH }" || exit 1
+    logger -t foxhole "Dashboard Viewer internet access turned ON by ${SUDO_USER:-root}"
+    echo "Dashboard Viewer ($DASH) internet access: ON"
+    echo "Remember to run 'sudo dashboard-internet off' when the updates are finished."
+    ;;
+  off)
+    if is_on; then /usr/sbin/nft delete element $SET "{ $DASH }" || exit 1; fi
+    logger -t foxhole "Dashboard Viewer internet access turned OFF by ${SUDO_USER:-root}"
+    echo "Dashboard Viewer ($DASH) internet access: OFF"
+    ;;
+  status)
+    if is_on; then echo "Dashboard Viewer ($DASH) internet access: ON"
+    else echo "Dashboard Viewer ($DASH) internet access: OFF"; fi
+    ;;
+  *)
+    echo "Usage: sudo dashboard-internet on|off|status"; exit 2
+    ;;
+esac
