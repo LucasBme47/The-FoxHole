@@ -250,7 +250,33 @@ sudo visudo -c -f /tmp/foxhole/011_foxhole-scoped
 sudo install -m 440 /tmp/foxhole/011_foxhole-scoped /etc/sudoers.d/011_foxhole-scoped
 ```
 
-## 15. Move the computers behind the Pi
+## 15. Optional: weekly backup to the NAS
+
+Needs the NAS disk from step 10 mounted at `/mnt/nas`. Replace `YOUR_PI_USER` in `foxhole-backup` first.
+
+```bash
+bash -n /tmp/foxhole/foxhole-backup              # syntax check; prints nothing when it is fine
+sudo bash /tmp/foxhole/foxhole-backup            # first backup, run straight from the folder (2-4 minutes)
+```
+
+If that ends with `== backup finished ==`, install it and its weekly timer:
+
+```bash
+sudo install -m 755 /tmp/foxhole/foxhole-backup /usr/local/sbin/foxhole-backup
+sudo install -m 644 /tmp/foxhole/foxhole-backup.service /tmp/foxhole/foxhole-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now foxhole-backup.timer
+systemctl list-timers foxhole-backup.timer
+```
+
+Archives go to `/mnt/nas/FoxHole-Backups/`, with a `.sha256` file next to each one; the newest 8 are kept. Each archive has a `RESTORE.txt` inside. Notes:
+
+- The backup stops without writing anything if `/mnt/nas` is not mounted, and fails if key files or the database snapshots are missing from the archive.
+- The Pi-hole, Grafana and Open WebUI databases are saved with SQLite's online backup, so nothing has to be stopped. The Open WebUI volume is found by asking Docker, because Compose adds the project name to the volume name.
+- **The archives contain secrets** (`/etc/suricata-triage.env`, password hashes, SSH host keys). On an NTFS disk, file permissions cannot protect them.
+- The NAS disk hangs off the same Pi. Copy an archive to another computer now and then.
+
+## 16. Move the computers behind the Pi
 
 Plug the switch into the Pi's USB Ethernet adapter and restart each computer's network connection so it picks up an address from Pi-hole.
 

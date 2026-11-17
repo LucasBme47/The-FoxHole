@@ -1,0 +1,14 @@
+# Deploy to: /etc/systemd/system/foxhole-backup.timer on the Pi
+# Weekly backup, Sunday between 05:30 and 05:40 (after the nightly rule update).
+# Persistent=true: if the Pi was off then, it runs shortly after the next boot.
+# Check:  systemctl list-timers foxhole-backup.timer
+[Unit]
+Description=Weekly FoxHole backup to the NAS
+
+[Timer]
+OnCalendar=Sun *-*-* 05:30
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

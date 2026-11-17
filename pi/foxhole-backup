@@ -1,0 +1,143 @@
+#!/bin/bash
+# foxhole-backup  ->  /usr/local/sbin/foxhole-backup on the Pi
+#
+# Settings + data backup of TheFoxHole to the NAS disk (/mnt/nas/FoxHole-Backups).
+# EXAMPLE VALUES: replace YOUR_PI_USER (home folder) with your login name on the Pi.
+# Runs weekly from foxhole-backup.timer (Sunday ~05:30, after the nightly rule update).
+# Run by hand:  sudo systemctl start foxhole-backup      (log: journalctl -u foxhole-backup -n 40)
+#
+# What is in each backup (one .tar.gz file):
+#   /etc, /usr/local, /opt, /var/lib/foxhole, Grafana, Prometheus, Loki, the Open WebUI
+#   data volume, /home/YOUR_PI_USER (without .cache), cron tables, /boot/firmware config.txt + cmdline.txt,
+#   consistent copies of the SQLite databases (sqlite-snapshots/), and lists of installed
+#   packages / enabled services (info/). See RESTORE.txt inside the archive.
+# Not included (can be downloaded again): installed programs from apt, Docker images,
+# the AI model files, Suricata's generated rules.
+#
+# The archive contains secrets (/etc/suricata-triage.env, password hashes, SSH host keys).
+# The NAS is NTFS, so file permissions cannot restrict it; only the SMB user can open it remotely.
+set -uo pipefail
+
+DEST=/mnt/nas/FoxHole-Backups
+KEEP=8                                   # number of backups kept; older ones are deleted
+MIN_FREE_MB=5000
+NAME="foxhole-$(date +%Y-%m-%d_%H%M)"
+WORK=$(mktemp -d /var/tmp/foxhole-backup.XXXXXX)
+trap 'rm -rf "$WORK"; rm -f "$DEST/$NAME.tar.gz.partial"' EXIT
+
+fail() { echo "BACKUP FAILED: $*" >&2; logger -t foxhole-backup "FAILED: $*"; exit 1; }
+
+[ "$(id -u)" = 0 ] || fail "must run as root (sudo)"
+mountpoint -q /mnt/nas || fail "/mnt/nas is not mounted (NAS disk unplugged?) - nothing was written"
+mkdir -p "$DEST" || fail "cannot create $DEST"
+free_mb=$(df -Pm "$DEST" | awk 'NR==2 {print $4}')
+[ "$free_mb" -gt "$MIN_FREE_MB" ] || fail "only ${free_mb} MB free on the NAS (need ${MIN_FREE_MB})"
+
+# Open WebUI's data folder: ask Docker where the container's volume lives (Compose names it
+# <project>_open-webui, currently /var/lib/docker/volumes/open-webui_open-webui/_data).
+OWUI=$(docker inspect open-webui --format \
+  '{{range .Mounts}}{{if eq .Destination "/app/backend/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)
+if [ -n "$OWUI" ] && [ -d "$OWUI" ]; then
+  OWUI_DB="$OWUI/webui.db"
+else
+  echo "WARNING: Open WebUI data folder not found (is the container missing?) - chats are NOT in this backup"
+  logger -t foxhole-backup "WARNING: Open WebUI data folder not found, skipped"
+  OWUI=""; OWUI_DB=""
+fi
+
+echo "== 1. database snapshots =="
+DBS="/etc/pihole/gravity.db /etc/pihole/pihole-FTL.db /var/lib/grafana/grafana.db $OWUI_DB"
+for db in $DBS; do
+  if [ ! -f "$db" ]; then echo "  (not found, skipped) $db"; continue; fi
+  out="$WORK/sqlite-snapshots$db"
+  mkdir -p "$(dirname "$out")"
+  python3 - "$db" "$out" <<'EOF' || fail "could not snapshot $db"
+import sqlite3, sys
+src = sqlite3.connect(sys.argv[1], timeout=60)
+dst = sqlite3.connect(sys.argv[2])
+src.backup(dst)          # SQLite's online backup: consistent even while the program writes
+dst.close(); src.close()
+EOF
+  echo "  ok $db ($(du -h "$out" | cut -f1))"
+done
+
+echo "== 2. rebuild information =="
+I="$WORK/info"; mkdir -p "$I"
+dpkg --get-selections            > "$I/dpkg-selections.txt"
+apt-mark showmanual              > "$I/apt-manual.txt"
+nft list ruleset                 > "$I/nft-ruleset-live.txt" 2>&1
+systemctl list-unit-files --state=enabled --no-pager > "$I/enabled-units.txt"
+docker ps -a --format '{{.Names}}  {{.Image}}  {{.Status}}' > "$I/docker-containers.txt" 2>&1
+docker image ls                  > "$I/docker-images.txt" 2>&1
+{ uname -a; cat /etc/os-release; } > "$I/system.txt"
+lsblk -f                         > "$I/disks.txt"
+cat > "$WORK/RESTORE.txt" <<'EOF'
+FoxHole backup - how to restore
+===============================
+Open the archive on the Pi:   sudo tar -xzf foxhole-DATE.tar.gz -C /tmp/restore
+(On Windows, 11's built-in "tar -xzf" or 7-Zip can open it to read single files.)
+
+Restoring single files: copy them back to the same path and restart the service.
+
+Rebuilding on a fresh SD card: follow INSTALL.md, then copy these back instead of
+re-creating them: /etc/nftables.conf, /etc/suricata/, /etc/foxhole/, /etc/pihole/,
+/etc/suricata-triage.env, /etc/pihole-exporter.env, /etc/sudoers.d/011_foxhole-scoped,
+/etc/systemd/system/*foxhole* and other FoxHole units, /usr/local/, /opt/open-webui/,
+/var/lib/foxhole/, /var/lib/grafana/, /boot/firmware/config.txt.
+Do NOT copy the whole /etc over a new system (passwords, machine IDs, packages differ).
+
+Databases: use the copies in sqlite-snapshots/ (they are consistent), not the live files.
+Stop the program first, copy the file to the same path, fix the owner, start it again, e.g.
+  sudo systemctl stop grafana-server
+  sudo cp sqlite-snapshots/var/lib/grafana/grafana.db /var/lib/grafana/grafana.db
+  sudo chown grafana:grafana /var/lib/grafana/grafana.db
+  sudo systemctl start grafana-server
+Prometheus history was copied while running; the last ~2 hours may be incomplete.
+info/ lists the installed packages and enabled services at backup time.
+EOF
+
+echo "== 3. archive =="
+# Live database files and their -wal/-shm companions are left out: the snapshots replace them.
+# tar exit 1 = "a file changed while being read" (normal for logs and Prometheus): kept as a warning.
+# --anchored: each exclude must match the FULL path from "/". Without it, excluding
+# var/lib/grafana/grafana.db would also drop sqlite-snapshots/var/lib/grafana/grafana.db.
+tar --create --gzip --file "$DEST/$NAME.tar.gz.partial" \
+    --warning=no-file-changed --warning=no-file-removed --one-file-system --anchored \
+    --exclude=/etc/pihole/gravity.db --exclude=/etc/pihole/gravity_old.db \
+    --exclude=/etc/pihole/pihole-FTL.db --exclude=/var/lib/grafana/grafana.db \
+    ${OWUI:+--exclude="$OWUI/webui.db" --exclude="$OWUI/cache"} \
+    --exclude='*.db-wal' --exclude='*.db-shm' \
+    --exclude=/home/YOUR_PI_USER/.cache --exclude='*/__pycache__' \
+    /etc /usr/local /opt /var/lib/foxhole /var/lib/grafana /var/lib/prometheus /var/lib/loki \
+    ${OWUI:+"$OWUI"} /home/YOUR_PI_USER /var/spool/cron \
+    /boot/firmware/config.txt /boot/firmware/cmdline.txt \
+    -C "$WORK" sqlite-snapshots info RESTORE.txt 2> "$WORK/tar-errors.txt"
+rc=$?
+grep -v "Removing leading" "$WORK/tar-errors.txt" | head -20
+[ $rc -le 1 ] || fail "tar exit code $rc"
+
+echo "== 4. check the archive =="
+gzip -t "$DEST/$NAME.tar.gz.partial" || fail "archive failed its integrity test"
+tar -tzf "$DEST/$NAME.tar.gz.partial" > "$WORK/contents.txt" || fail "archive cannot be listed"
+count=$(wc -l < "$WORK/contents.txt")
+for must in etc/nftables.conf etc/suricata-triage.env usr/local/lib/foxhole/foxhole_triage.py \
+            sqlite-snapshots/etc/pihole/gravity.db sqlite-snapshots/var/lib/grafana/grafana.db \
+            ${OWUI:+"sqlite-snapshots$OWUI/webui.db"} RESTORE.txt; do
+  grep -qxF "$must" "$WORK/contents.txt" || fail "archive is missing $must"
+done
+for live in etc/pihole/gravity.db var/lib/grafana/grafana.db; do
+  ! grep -qxF "$live" "$WORK/contents.txt" || fail "archive unexpectedly contains the live $live"
+done
+mv "$DEST/$NAME.tar.gz.partial" "$DEST/$NAME.tar.gz"
+(cd "$DEST" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+size=$(du -h "$DEST/$NAME.tar.gz" | cut -f1)
+echo "  ok: $count files, $size"
+
+echo "== 5. keep the newest $KEEP =="
+ls -1t "$DEST"/foxhole-*.tar.gz 2>/dev/null | tail -n +$((KEEP + 1)) | while read -r old; do
+  rm -f "$old" "$old.sha256" && echo "  deleted $(basename "$old")"
+done
+ls -lh "$DEST"
+
+logger -t foxhole-backup "OK: $NAME.tar.gz ($size, $count files)"
+echo "== backup finished: $DEST/$NAME.tar.gz ($size) =="

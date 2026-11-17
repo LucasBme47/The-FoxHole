@@ -47,6 +47,7 @@ Example devices used throughout the files:
 | Chat | Open WebUI on port 8081. |
 | Dashboards | Grafana on port 3000, Prometheus on 9090, logs in Loki. |
 | NAS | Samba share on the LAN side only. |
+| Backups | `foxhole-backup` writes a weekly settings + data archive to the NAS and keeps the newest 8. |
 
 ### Email alerts
 
@@ -84,6 +85,8 @@ Everything is in [`pi/`](pi/). The setup scripts expect this folder copied to `/
 | `dashboard-internet` | `/usr/local/sbin/` | `on` / `off` / `status` switch for DashboardPC's internet |
 | `011_foxhole-scoped` | `/etc/sudoers.d/` | Limited passwordless sudo |
 | `foxhole-rules-update.service` / `.timer` | `/etc/systemd/system/` | Nightly Suricata rule update (installed by `setup-suricata.sh`) |
+| `foxhole-backup` | `/usr/local/sbin/` | Settings + data backup to the NAS |
+| `foxhole-backup.service` / `.timer` | `/etc/systemd/system/` | Runs the backup weekly (Sunday ~05:30) |
 | `setup-suricata.sh` | run once | Configures Suricata for inline mode |
 | `setup-monitoring.sh` | run once | Installs Grafana, Loki, Promtail, pihole-exporter |
 | `setup-triage.sh` | run once | Installs the triage service, dashboard switch and Samba share |
@@ -111,7 +114,7 @@ There is no single settings file yet. If you change an address or a device, chan
 | AdminPC (10.0.0.2) | `nftables.conf` (`LAPTOP`), `foxhole_triage.py` (`DEVICES`, `AUTOBLOCK_EXEMPT_IPS`), Pi-hole DHCP settings |
 | GameServer (10.0.0.18) | `nftables.conf` (`GAMESRV`), `local.rules`, `foxhole_triage.py` (`DEVICES`), Pi-hole DHCP settings |
 | DashboardPC (10.0.0.20) | `nftables.conf` (`DASH`), `dashboard-internet`, `foxhole_triage.py` (`DEVICES`), Pi-hole DHCP settings |
-| Pi login name | `011_foxhole-scoped`, `setup-triage.sh`, the `hailo-ollama` service file |
+| Pi login name | `011_foxhole-scoped`, `setup-triage.sh`, `foxhole-backup`, the `hailo-ollama` service file |
 
 Moving these into one file is a welcome contribution; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -125,6 +128,7 @@ Moving these into one file is a welcome contribution; see [CONTRIBUTING.md](CONT
 | Send a test email | See step 11 of [INSTALL.md](INSTALL.md) |
 | Reload Suricata rules | `sudo systemctl reload suricata` |
 | Update Suricata rules now (also runs nightly) | `sudo systemctl start foxhole-rules-update` |
+| Back up to the NAS now (also runs weekly) | `sudo systemctl start foxhole-backup` |
 | Unblock an address | `sudo nft delete element inet filter BLOCKED_IPS { ADDRESS }` |
 
 ## Known limits

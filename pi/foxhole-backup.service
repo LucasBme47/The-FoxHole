@@ -1,0 +1,13 @@
+# Deploy to: /etc/systemd/system/foxhole-backup.service on the Pi
+# Run by hand:  sudo systemctl start foxhole-backup
+# Result:       journalctl -u foxhole-backup -n 40
+[Unit]
+Description=FoxHole settings + data backup to the NAS
+RequiresMountsFor=/mnt/nas
+After=foxhole-rules-update.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/local/sbin/foxhole-backup
