@@ -6,8 +6,10 @@ Reads Suricata's eve.json as it is written and:
   1. ALERTS  - every Suricata alert is looked up in AbuseIPDB, summarised by the
                on-device LLM (Hailo NPU via hailo-ollama) and written to triage.log.
                Severity 1-2 alerts are emailed.
-  2. TRAFFIC - every finished connection (flow) to/from an internet address is looked
-               up in AbuseIPDB (cached, daily budget). No Suricata alert is needed.
+  2. TRAFFIC - every finished connection (flow) to/from an internet address is checked
+               against AbuseIPDB's daily worst-addresses list (free, local) and looked up
+               in AbuseIPDB (remembered 1-7 days by score; the daily limit is read from
+               AbuseIPDB's own answers). No Suricata alert is needed.
   3. URGENT  - if AbuseIPDB confidence is >= 80 %, an email tagged [URGENT] is sent
                with an LLM summary and suggested remediation steps.
   4. SSH brute force -> automatic 30-minute block (nftables BLOCKED_IPS), as before.
@@ -50,9 +52,22 @@ ALERT_EMAIL = os.environ["ALERT_EMAIL"]
 ABUSEIPDB_KEY = os.environ["ABUSEIPDB_KEY"]
 
 ABUSEIPDB_THRESHOLD = 80        # % confidence at which an URGENT email is sent
-ABUSE_CACHE_HOURS = 24          # do not ask AbuseIPDB about the same address again for this long
-ABUSE_DAILY_BUDGET = 900        # free plan allows 1000 lookups/day
-ABUSE_ALERT_RESERVE = 150       # lookups held back for Suricata alerts (traffic checks stop first)
+# How long an AbuseIPDB answer is remembered before the address is looked up again.
+# Clean addresses (mostly Microsoft/Google/Akamai/Amazon) are kept longer; anything with
+# a real score is re-checked daily so a worsening address is noticed quickly.
+CACHE_TTL_CLEAN = 7 * 86400     # score 0 %
+CACHE_TTL_LOW = 3 * 86400       # score 1-24 %
+CACHE_TTL_RISKY = 86400         # score 25 % and up
+FAILED_RETRY = 900              # after a failed lookup, leave that address alone for 15 minutes
+# The free plan allows 1000 lookups a day. The remaining count is taken from AbuseIPDB's own
+# answer headers (its day does not start at local midnight), so it is always accurate.
+ABUSE_ALERT_RESERVE = 150       # when this few are left, traffic checks stop; Suricata alerts still get them
+# AbuseIPDB's daily list of the worst addresses (free plan: 5 downloads/day, up to 10,000 IPs).
+# Every connection is checked against it locally, which costs no lookups.
+BLACKLIST_FILE = os.path.join(STATE_DIR, "abuseipdb-blacklist.txt")
+BLACKLIST_REFRESH = 86400       # download once a day
+BLACKLIST_RETRY = 6 * 3600      # after a failed download, wait 6 hours (stays well under 5/day)
+STATS_INTERVAL = 3600           # write a usage summary line to the log every hour
 EMAIL_COOLDOWN = 6 * 3600       # at most one email per bad address per 6 hours
 DEDUP_WINDOW = 60               # same Suricata rule within 60 s = one triage
 
@@ -80,7 +95,12 @@ _last_emailed = defaultdict(float)
 _last_seen_sig = defaultdict(float)
 _ip_hostname = {}                       # internet IP -> last TLS SNI / HTTP host seen
 _abuse_cache = {}                       # ip -> {"t": epoch, "r": report}
-_budget = {"day": "", "used": 0, "warned": False}
+_abuse_failed = {}                      # ip -> epoch of the last failed lookup
+# remaining/reset come from AbuseIPDB's X-RateLimit-* headers; None = not known yet
+_budget = {"remaining": None, "reset": 0, "paused_until": 0, "warned": False}
+_blacklist = set()                      # AbuseIPDB's daily worst-addresses list
+_bl_state = {"next_try": 0, "loaded_mtime": 0}
+_stats = {"since": time.time(), "lookups": 0, "remembered": 0, "listed_hits": 0, "skipped": 0}
 _cache_dirty = 0
 
 
@@ -166,13 +186,32 @@ def pick_sides(event):
 
 
 # --------------------------------------------------------------------------- AbuseIPDB
+def cache_ttl(report):
+    c = report.get("confidence", 0)
+    if c == 0:
+        return CACHE_TTL_CLEAN
+    if c < 25:
+        return CACHE_TTL_LOW
+    return CACHE_TTL_RISKY
+
+
+def cached_report(ip, now):
+    hit = _abuse_cache.get(ip)
+    if hit and now - hit["t"] < cache_ttl(hit["r"]):
+        return hit["r"]
+    return None
+
+
 def load_cache():
     global _abuse_cache
     try:
         with open(CACHE_FILE) as f:
             data = json.load(f)
         _abuse_cache = data.get("cache", {})
-        _budget.update(data.get("budget", {}))
+        saved = data.get("budget", {})
+        for k in ("remaining", "reset", "paused_until", "warned"):   # ignore older-format keys
+            if k in saved:
+                _budget[k] = saved[k]
     except (FileNotFoundError, ValueError):
         pass
 
@@ -181,8 +220,8 @@ def save_cache(force=False):
     global _cache_dirty
     if not force and _cache_dirty < 20:
         return
-    cutoff = time.time() - ABUSE_CACHE_HOURS * 3600
-    for ip in [k for k, v in _abuse_cache.items() if v["t"] < cutoff]:
+    now = time.time()
+    for ip in [k for k, v in _abuse_cache.items() if now - v["t"] >= cache_ttl(v["r"])]:
         del _abuse_cache[ip]
     tmp = CACHE_FILE + ".tmp"
     with open(tmp, "w") as f:
@@ -191,23 +230,59 @@ def save_cache(force=False):
     _cache_dirty = 0
 
 
+def _int_header(resp, name):
+    try:
+        return int(float(resp.headers.get(name, "")))
+    except (TypeError, ValueError):
+        return None
+
+
+def note_rate_headers(resp, now):
+    """Take the remaining-lookups count and reset time from AbuseIPDB's own answer."""
+    remaining = _int_header(resp, "X-RateLimit-Remaining")
+    reset = _int_header(resp, "X-RateLimit-Reset")
+    if remaining is not None:
+        _budget["remaining"] = remaining
+    if reset is not None and now < reset < now + 2 * 86400:
+        _budget["reset"] = reset
+    elif remaining is not None and not now < _budget["reset"] < now + 2 * 86400:
+        _budget["reset"] = now + 3600          # no usable reset time: re-sync within the hour
+
+
+def budget_open(now, for_alert):
+    """False if a lookup now would be refused or would eat into the alert reserve."""
+    if now < _budget["paused_until"]:
+        return False
+    if _budget["reset"] and now >= _budget["reset"]:
+        _budget.update(remaining=None, reset=0, warned=False)   # new AbuseIPDB day
+    remaining = _budget["remaining"]
+    if remaining is None:
+        return True
+    if remaining <= 0:
+        return False
+    if not for_alert and remaining <= ABUSE_ALERT_RESERVE:
+        if not _budget["warned"]:
+            _budget["warned"] = True
+            log(f"[!] Only {remaining} AbuseIPDB lookups left today. Traffic checks pause until "
+                f"{when(_budget['reset'])}; Suricata alerts and the daily worst-addresses list are still checked.")
+        return False
+    return True
+
+
+def when(epoch):
+    return datetime.fromtimestamp(epoch).strftime("%H:%M on %b %d") if epoch else "AbuseIPDB's daily reset"
+
+
 def check_abuseipdb(ip, for_alert):
     """Return an AbuseIPDB report dict, or None if no lookup was possible."""
     global _cache_dirty
     now = time.time()
-    hit = _abuse_cache.get(ip)
-    if hit and now - hit["t"] < ABUSE_CACHE_HOURS * 3600:
-        return hit["r"]
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    if _budget["day"] != today:
-        _budget.update(day=today, used=0, warned=False)
-    limit = ABUSE_DAILY_BUDGET if for_alert else ABUSE_DAILY_BUDGET - ABUSE_ALERT_RESERVE
-    if _budget["used"] >= limit:
-        if not _budget["warned"] and not for_alert:
-            _budget["warned"] = True
-            log(f"[!] AbuseIPDB daily budget for traffic checks used up ({_budget['used']} lookups). "
-                f"Traffic checks pause until midnight; Suricata alerts are still checked.")
+    hit = cached_report(ip, now)
+    if hit is not None:
+        _stats["remembered"] += 1
+        return hit
+    if now - _abuse_failed.get(ip, 0) < FAILED_RETRY or not budget_open(now, for_alert):
+        _stats["skipped"] += 1
         return None
 
     try:
@@ -217,10 +292,27 @@ def check_abuseipdb(ip, for_alert):
             params={"ipAddress": ip, "maxAgeInDays": 90},
             timeout=10,
         )
-        _budget["used"] += 1
+    except Exception as e:
+        _abuse_failed[ip] = now
+        log(f"    -> [ABUSEIPDB ERROR for {ip}: {e}]")
+        return None
+    note_rate_headers(resp, now)
+    if resp.status_code == 429:
+        wait = _int_header(resp, "Retry-After") or 3600
+        _budget["paused_until"] = now + wait
+        _budget["remaining"] = 0
+        save_cache(force=True)
+        log(f"[!] AbuseIPDB says the daily lookup limit is used up. Lookups paused until "
+            f"{when(now + wait)}; the daily worst-addresses list is still checked.")
+        return None
+    _stats["lookups"] += 1
+    try:
         resp.raise_for_status()
         d = resp.json().get("data", {})
     except Exception as e:
+        _abuse_failed[ip] = now
+        if len(_abuse_failed) > 5000:
+            _abuse_failed.clear()
         log(f"    -> [ABUSEIPDB ERROR for {ip}: {e}]")
         return None
 
@@ -236,6 +328,108 @@ def check_abuseipdb(ip, for_alert):
     _cache_dirty += 1
     save_cache()
     return report
+
+
+# --------------------------------------------------------------------------- daily worst-addresses list
+def _parse_blacklist(resp):
+    """Accept either the plain-text answer (one IP per line) or the JSON answer."""
+    text = resp.text.strip()
+    if text.startswith("{"):
+        lines = [row.get("ipAddress", "") for row in resp.json().get("data", [])]
+    else:
+        lines = text.splitlines()
+    ips = set()
+    for line in lines:
+        line = line.strip()
+        try:
+            ipaddress.ip_address(line)
+            ips.add(line)
+        except ValueError:
+            continue
+    return ips
+
+
+def load_blacklist_file():
+    global _blacklist
+    try:
+        mtime = os.path.getmtime(BLACKLIST_FILE)
+        with open(BLACKLIST_FILE) as f:
+            _blacklist = {line.strip() for line in f if line.strip()}
+        _bl_state["loaded_mtime"] = mtime
+        return mtime
+    except FileNotFoundError:
+        return 0
+
+
+def refresh_blacklist(now):
+    """Download AbuseIPDB's worst-addresses list once a day. Cheap to call often."""
+    global _blacklist
+    if now < _bl_state["next_try"]:
+        return
+    try:
+        mtime = os.path.getmtime(BLACKLIST_FILE)
+    except FileNotFoundError:
+        mtime = 0
+    if now - mtime < BLACKLIST_REFRESH:          # the saved copy is still fresh
+        if mtime != _bl_state["loaded_mtime"]:
+            load_blacklist_file()
+        _bl_state["next_try"] = mtime + BLACKLIST_REFRESH
+        return
+    _bl_state["next_try"] = now + BLACKLIST_RETRY  # unless the download below succeeds
+    try:
+        resp = requests.get(
+            "https://api.abuseipdb.com/api/v2/blacklist",
+            headers={"Key": ABUSEIPDB_KEY, "Accept": "text/plain"},
+            params={"limit": 10000, "ipVersion": 4},
+            timeout=60,
+        )
+        if resp.status_code == 429:
+            wait = _int_header(resp, "Retry-After") or BLACKLIST_RETRY
+            _bl_state["next_try"] = now + max(wait, 600)
+            log(f"[!] Worst-addresses list: download limit reached, next try {when(_bl_state['next_try'])}.")
+            return
+        resp.raise_for_status()
+        ips = _parse_blacklist(resp)
+    except Exception as e:
+        log(f"[!] Worst-addresses list download failed ({e}); keeping the previous copy "
+            f"({len(_blacklist)} addresses), next try {when(_bl_state['next_try'])}.")
+        return
+    if len(ips) < 100:
+        log(f"[!] Worst-addresses list download looked wrong ({len(ips)} addresses); keeping the previous copy.")
+        return
+    tmp = BLACKLIST_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(sorted(ips)) + "\n")
+    os.replace(tmp, BLACKLIST_FILE)
+    _blacklist = ips
+    _bl_state["loaded_mtime"] = os.path.getmtime(BLACKLIST_FILE)
+    _bl_state["next_try"] = now + BLACKLIST_REFRESH
+    log(f"[*] Worst-addresses list updated from AbuseIPDB: {len(ips)} addresses.")
+
+
+def reputation(ip, for_alert):
+    """AbuseIPDB view of an address: the daily list first (free), then a lookup if needed."""
+    listed = ip in _blacklist
+    if listed:
+        _stats["listed_hits"] += 1
+    # An address on the worst-addresses list always gets a lookup for details, even from the reserve.
+    abuse = check_abuseipdb(ip, for_alert=for_alert or listed)
+    if not listed:
+        return abuse
+    merged = dict(abuse) if abuse else {"reports": "?", "country": "?", "isp": "?", "usage": "?", "domain": "?"}
+    merged["confidence"] = max(merged.get("confidence", 0), 100)
+    merged["listed"] = True
+    return merged
+
+
+def log_stats(now):
+    if now - _stats["since"] < STATS_INTERVAL:
+        return
+    left = _budget["remaining"]
+    log(f"[*] Past hour: {_stats['lookups']} AbuseIPDB lookups, {_stats['remembered']} answered from memory, "
+        f"{_stats['skipped']} skipped (paused or recently failed), {_stats['listed_hits']} on the worst-addresses list. "
+        f"Lookups left today: {'unknown' if left is None else left}. Remembered addresses: {len(_abuse_cache)}.")
+    _stats.update(since=now, lookups=0, remembered=0, listed_hits=0, skipped=0)
 
 
 # --------------------------------------------------------------------------- LLM
@@ -282,7 +476,9 @@ def describe(event, ext_ip, home_ip, direction, abuse, hostname):
     if abuse:
         lines.append(f"AbuseIPDB: {abuse['confidence']}% confidence malicious, "
                      f"{abuse['reports']} reports in 90 days, ISP: {abuse['isp']}, "
-                     f"country: {abuse['country']}, usage type: {abuse['usage']}")
+                     f"country: {abuse['country']}, usage type: {abuse['usage']}"
+                     + ("; the address is on AbuseIPDB's daily list of the worst 10,000 addresses"
+                        if abuse.get("listed") else ""))
     return "\n".join(lines)
 
 
@@ -450,7 +646,7 @@ def handle_alert(event):
     ext_ip, home_ip, direction = pick_sides(event)
     hostname = (event.get("tls", {}).get("sni") or event.get("http", {}).get("hostname")
                 or _ip_hostname.get(ext_ip))
-    abuse = check_abuseipdb(ext_ip, for_alert=True) if ext_ip else None
+    abuse = reputation(ext_ip, for_alert=True) if ext_ip else None
     if abuse:
         hot = abuse["confidence"] >= ABUSEIPDB_THRESHOLD
         log(f"    -> AbuseIPDB: {RED if hot else ''}{abuse['confidence']}% ({abuse['isp']}){RESET if hot else ''}")
@@ -499,16 +695,9 @@ def handle_flow(event):
     ext_ip, home_ip, direction = pick_sides(event)
     if not ext_ip:
         return
-    if ext_ip in _abuse_cache and time.time() - _abuse_cache[ext_ip]["t"] < ABUSE_CACHE_HOURS * 3600:
-        abuse = _abuse_cache[ext_ip]["r"]
-        if abuse["confidence"] < ABUSEIPDB_THRESHOLD:
-            return                               # already known, not bad - the common case
-    else:
-        abuse = check_abuseipdb(ext_ip, for_alert=False)
-        if not abuse:
-            return
-    if abuse["confidence"] < ABUSEIPDB_THRESHOLD:
-        return
+    abuse = reputation(ext_ip, for_alert=False)
+    if not abuse or abuse["confidence"] < ABUSEIPDB_THRESHOLD:
+        return                                   # unknown or not bad - the common case
 
     hostname = _ip_hostname.get(ext_ip)
     ok, why = urgent_or_ignored(ext_ip, hostname, abuse)
@@ -537,6 +726,9 @@ def remember_hostname(event):
 
 
 def handle_line(line):
+    now = time.time()
+    refresh_blacklist(now)
+    log_stats(now)
     try:
         event = json.loads(line)
     except ValueError:
@@ -585,9 +777,16 @@ def follow(path):
 def main():
     os.makedirs(STATE_DIR, exist_ok=True)
     load_cache()
+    load_blacklist_file()
     log(f"[*] FoxHole triage started. Watching {EVE_LOG}; summaries -> {TRIAGE_LOG}")
+    left = _budget["remaining"]
     log(f"[*] LLM: {MODEL} | AbuseIPDB urgent threshold: {ABUSEIPDB_THRESHOLD}% | "
-        f"lookups used today: {_budget['used']}/{ABUSE_DAILY_BUDGET}")
+        f"lookups left today: {'unknown until the first lookup' if left is None else left} | "
+        f"remembered addresses: {len(_abuse_cache)}")
+    if time.time() < _budget["paused_until"]:
+        log(f"[*] AbuseIPDB lookups are paused until {when(_budget['paused_until'])} (daily limit reached).")
+    refresh_blacklist(time.time())
+    log(f"[*] Worst-addresses list: {len(_blacklist)} addresses")
     log(f"[*] Ignoring {len(IGNORE_SIGS)} signature patterns, {len(IGNORE_DOMAINS)} domains, "
         f"{len(IGNORE_NETS)} address ranges")
     try:

@@ -1,0 +1,18 @@
+# Deploy to: /etc/systemd/system/foxhole-rules-update.service on the Pi
+# Daily Suricata rule refresh (ET Open, including its known-bad address lists).
+# suricata-update applies /etc/suricata/disable.conf and test-loads the new rules
+# (suricata -T) before writing them; if anything fails, the reload below is skipped
+# and Suricata keeps running on the old rules. The reload swaps rules live: no traffic stops.
+# Run by hand:  sudo systemctl start foxhole-rules-update
+# Result:       journalctl -u foxhole-rules-update -n 30
+[Unit]
+Description=FoxHole daily Suricata rule update
+After=network-online.target suricata.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/bin/suricata-update
+ExecStartPost=/usr/bin/systemctl reload suricata

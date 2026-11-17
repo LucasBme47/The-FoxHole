@@ -40,7 +40,8 @@ Example devices used throughout the files:
 | Firewall and NAT | nftables, default drop. Everything forwarded is queued to Suricata. |
 | Intrusion prevention | Suricata inline. If Suricata stops, forwarding stops (fail-closed). |
 | DNS, DHCP, ad blocking | Pi-hole on the LAN side. Admin page on port 8080. |
-| Threat triage | `foxhole_triage.py` follows Suricata's `eve.json`, looks up internet addresses in AbuseIPDB (cached, with a daily budget) and emails you. |
+| Threat triage | `foxhole_triage.py` follows Suricata's `eve.json`, checks internet addresses against AbuseIPDB and emails you. See "Staying inside AbuseIPDB's free plan" below. |
+| Rule updates | `foxhole-rules-update.timer` refreshes the Suricata rules every night, including ET Open's known-bad address lists. |
 | Local AI | Qwen 2.5 1.5B on the Hailo NPU writes the short summary in each alert email. |
 | AI relay | `llm_proxy.py` sits in front of hailo-ollama: it removes request fields hailo-ollama rejects, makes requests take turns on the NPU, and pins replies to English. |
 | Chat | Open WebUI on port 8081. |
@@ -54,6 +55,16 @@ Example devices used throughout the files:
 - `[AUTOBLOCK]`: repeated SSH attempts; the source is blocked for 30 minutes.
 
 The remediation steps are fixed text, not AI-written, because a 1.5B model is not reliable enough to invent them.
+
+### Staying inside AbuseIPDB's free plan
+
+The free plan allows 1,000 address lookups a day. A home network easily talks to that many different addresses, almost all of them Microsoft, Google, Akamai and Amazon. The triage service stretches the budget like this:
+
+- **Answers are remembered by score:** 0% for 7 days, 1-24% for 3 days, 25% and up for 1 day, so risky addresses are re-checked often.
+- **The remaining count comes from AbuseIPDB's own answer headers**, because AbuseIPDB's day does not start at local midnight. When it says the limit is reached, lookups pause until its reset time (no retry storm). A failed lookup is not retried for 15 minutes.
+- **A reserve of 150 lookups** is kept for Suricata alerts; ordinary traffic checks stop first.
+- **AbuseIPDB's daily list of the 10,000 worst addresses** (the free plan allows 5 downloads a day) is downloaded once a day and every connection is checked against it locally, at no cost. A listed address is emailed as `[URGENT] [THREAT 100%]` even while lookups are paused.
+- **A usage line** ("Past hour: ... lookups ...") is written to the log every hour, so you can see what the budget is spent on.
 
 ## Files
 
@@ -72,6 +83,7 @@ Everything is in [`pi/`](pi/). The setup scripts expect this folder copied to `/
 | `docker-compose.yml` | `/opt/open-webui/` | Open WebUI |
 | `dashboard-internet` | `/usr/local/sbin/` | `on` / `off` / `status` switch for DashboardPC's internet |
 | `011_foxhole-scoped` | `/etc/sudoers.d/` | Limited passwordless sudo |
+| `foxhole-rules-update.service` / `.timer` | `/etc/systemd/system/` | Nightly Suricata rule update (installed by `setup-suricata.sh`) |
 | `setup-suricata.sh` | run once | Configures Suricata for inline mode |
 | `setup-monitoring.sh` | run once | Installs Grafana, Loki, Promtail, pihole-exporter |
 | `setup-triage.sh` | run once | Installs the triage service, dashboard switch and Samba share |
@@ -112,6 +124,7 @@ Moving these into one file is a welcome contribution; see [CONTRIBUTING.md](CONT
 | Watch the triage service | `soc` |
 | Send a test email | See step 11 of [INSTALL.md](INSTALL.md) |
 | Reload Suricata rules | `sudo systemctl reload suricata` |
+| Update Suricata rules now (also runs nightly) | `sudo systemctl start foxhole-rules-update` |
 | Unblock an address | `sudo nft delete element inet filter BLOCKED_IPS { ADDRESS }` |
 
 ## Known limits

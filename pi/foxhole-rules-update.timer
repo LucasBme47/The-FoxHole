@@ -1,0 +1,14 @@
+# Deploy to: /etc/systemd/system/foxhole-rules-update.timer on the Pi
+# Runs foxhole-rules-update.service every night between 04:30 and 05:00.
+# Persistent=true: if the Pi was off at that time, it runs shortly after the next boot.
+# Check:  systemctl list-timers foxhole-rules-update.timer
+[Unit]
+Description=Daily Suricata rule update (FoxHole)
+
+[Timer]
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

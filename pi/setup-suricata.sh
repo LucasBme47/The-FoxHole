@@ -50,6 +50,12 @@ cat > /etc/logrotate.d/suricata <<'EOF'
 }
 EOF
 
+# 6b. Daily rule update (ET Open address lists go stale within days)
+install -m 644 "$SRC/foxhole-rules-update.service" /etc/systemd/system/foxhole-rules-update.service
+install -m 644 "$SRC/foxhole-rules-update.timer" /etc/systemd/system/foxhole-rules-update.timer
+systemctl daemon-reload
+systemctl enable foxhole-rules-update.timer
+
 # 7. Rebuild rules with disable.conf applied, validate, restart
 suricata-update 2>&1 | tail -2
 echo "--- config test ---"

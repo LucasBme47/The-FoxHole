@@ -98,7 +98,9 @@ sudo pihole setpassword
 sudo bash /tmp/foxhole/setup-suricata.sh
 ```
 
-This installs `local.rules` and `disable.conf`, sets `HOME_NET`, switches Suricata to read from NFQUEUE 0, sets up log rotation and restarts it. Expect "2 rule files processed" and "0 rules failed" at the end.
+This installs `local.rules` and `disable.conf`, sets `HOME_NET`, switches Suricata to read from NFQUEUE 0, sets up log rotation, enables the nightly rule-update timer and restarts it. Expect "2 rule files processed" and "0 rules failed" at the end.
+
+Check the timer is scheduled: `systemctl list-timers foxhole-rules-update.timer`. On a Pi 5 (8 GB) a rule update takes about 40 seconds and needs about 1.5 GB of free memory while it test-loads the new rules; the live swap does not interrupt traffic.
 
 ## 7. Hailo software and the model (AI HAT+ 2)
 
