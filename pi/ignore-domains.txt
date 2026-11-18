@@ -14,6 +14,11 @@ aurelius.host
 #     AbuseIPDB scores badly (a false positive seen during the build) ---
 push.services.mozilla.com
 
+# --- uBlock Origin filter-list updates. Shared GitHub Pages addresses score
+#     badly on AbuseIPDB (a false positive seen during the build) ---
+ublockorigin.github.io
+curbengh.github.io          # uBlock Origin's malware/phishing blocklist (same false positive)
+
 # --- Splashtop (remote-control engine used by Syncro) ---
 splashtop.com
 splashtop.eu

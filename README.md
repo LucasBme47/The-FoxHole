@@ -79,7 +79,7 @@ Everything is in [`pi/`](pi/). The setup scripts expect this folder copied to `/
 | `foxhole_triage.py` | `/usr/local/lib/foxhole/` | Triage service |
 | `suricata-triage.env.example` | `/etc/suricata-triage.env` | Template for mail and AbuseIPDB credentials |
 | `pihole-exporter.env.example` | `/etc/pihole-exporter.env` | Template for the Pi-hole exporter's password |
-| `ignore-*.txt` | `/etc/foxhole/` | Signatures, domains and addresses never emailed about |
+| `ignore-*.txt` | `/etc/foxhole/` | Signatures, domains and addresses never emailed about (domains only count when DNS confirms the address belongs to the name) |
 | `llm_proxy.py` | `/usr/local/lib/foxhole/` | Relay in front of hailo-ollama |
 | `docker-compose.yml` | `/opt/open-webui/` | Open WebUI |
 | `dashboard-internet` | `/usr/local/sbin/` | `on` / `off` / `status` switch for DashboardPC's internet |

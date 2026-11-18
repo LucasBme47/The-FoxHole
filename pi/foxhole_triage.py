@@ -16,7 +16,10 @@ Reads Suricata's eve.json as it is written and:
 
 Tuning without touching this file - one entry per line, '#' starts a comment:
   /etc/foxhole/ignore-signatures.txt   text that, if found in a rule name, silences it
-  /etc/foxhole/ignore-domains.txt      domains (and sub-domains) never emailed about
+  /etc/foxhole/ignore-domains.txt      domains (and sub-domains) not emailed about for bad
+                                       AbuseIPDB scores - only when a trusted DNS answer (or
+                                       the Pi's own lookup) confirms the address belongs to
+                                       the name, and never for severity 1-2 rule matches
   /etc/foxhole/ignore-ips.txt          IP addresses or CIDR ranges never emailed about
 After editing:  sudo systemctl restart foxhole-triage
 
@@ -26,6 +29,7 @@ import ipaddress
 import json
 import os
 import smtplib
+import socket
 import subprocess
 import sys
 import time
@@ -71,6 +75,22 @@ STATS_INTERVAL = 3600           # write a usage summary line to the log every ho
 EMAIL_COOLDOWN = 6 * 3600       # at most one email per bad address per 6 hours
 DEDUP_WINDOW = 60               # same Suricata rule within 60 s = one triage
 
+# ignore-domains.txt is only honoured when the address really belongs to the hostname.
+# The hostname comes from the connection itself (TLS SNI / HTTP Host), which the device
+# chooses, so malware could claim an ignored name while talking to its own server.
+# An address counts as confirmed if a DNS answer from one of these resolvers gave that
+# name -> address to a home device, or failing that, if the Pi's own lookup returns it.
+# Answers from any other DNS server are not trusted (malware can run its own).
+# EXAMPLE VALUES - list the DNS servers your own devices use.
+TRUSTED_DNS = {
+    "10.0.0.1",                          # Pi-hole on this Pi
+    "192.168.0.1",                       # upstream router
+    "1.1.1.1", "1.0.0.1",                # Cloudflare
+    "185.228.168.168", "185.228.169.168",  # CleanBrowsing
+}
+DNS_MEMORY_MAX = 50000          # address -> names remembered from DNS answers (cleared when full)
+LOOKUP_TTL = 600                # the Pi's own fallback lookups are reused for 10 minutes
+
 # EXAMPLE VALUES - change the network and device list to match your own.
 HOME_NET = ipaddress.ip_network("10.0.0.0/24")
 DEVICES = {
@@ -94,6 +114,9 @@ _last_blocked = defaultdict(float)
 _last_emailed = defaultdict(float)
 _last_seen_sig = defaultdict(float)
 _ip_hostname = {}                       # internet IP -> last TLS SNI / HTTP host seen
+_flow_hostname = {}                     # Suricata flow_id -> TLS SNI / HTTP host of that connection
+_dns_names = {}                         # internet IP -> names a trusted DNS answer gave it
+_lookup_cache = {}                      # hostname -> (epoch, set of addresses) from the Pi's own lookup
 _abuse_cache = {}                       # ip -> {"t": epoch, "r": report}
 _abuse_failed = {}                      # ip -> epoch of the last failed lookup
 # remaining/reset come from AbuseIPDB's X-RateLimit-* headers; None = not known yet
@@ -153,6 +176,35 @@ def ip_ignored(ip):
     except ValueError:
         return False
     return any(a in n for n in IGNORE_NETS)
+
+
+def _resolve_now(host):
+    """The Pi's own lookup of host (cached). Returns a set of address strings."""
+    now = time.time()
+    hit = _lookup_cache.get(host)
+    if hit and now - hit[0] < LOOKUP_TTL:
+        return hit[1]
+    try:
+        addrs = {ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)}
+    except (OSError, UnicodeError):
+        addrs = set()
+    if len(_lookup_cache) > 2000:
+        _lookup_cache.clear()
+    _lookup_cache[host] = (now, addrs)
+    return addrs
+
+
+def domain_ignored_confirmed(ip, host):
+    """(ignored, warning). ignored is True only if host is in ignore-domains.txt AND the
+    address really belongs to it. warning is text for the email when the name is on the
+    list but could not be matched to the address (possibly faked)."""
+    if not domain_ignored(host):
+        return False, ""
+    h = host.lower().strip(".")
+    if h in _dns_names.get(ip, ()) or ip in _resolve_now(h):
+        return True, ""
+    return False, (f"WARNING: the hostname {host} is on the ignore list, but no trusted DNS answer "
+                   f"links it to {ip}. The hostname may be faked, so this was NOT treated as ignored.")
 
 
 # --------------------------------------------------------------------------- helpers
@@ -617,14 +669,15 @@ def handle_ssh(event, sig):
 
 # --------------------------------------------------------------------------- event handlers
 def urgent_or_ignored(ext_ip, hostname, abuse):
-    """Decide whether a >=80% hit is emailed. Returns (send, reason_if_not)."""
+    """Decide whether a >=80% hit is emailed. Returns (send, reason_if_not, warning)."""
     if ip_ignored(ext_ip):
-        return False, "address is in ignore-ips.txt"
-    if domain_ignored(hostname):
-        return False, f"hostname {hostname} is in ignore-domains.txt"
+        return False, "address is in ignore-ips.txt", ""
+    ignored, warning = domain_ignored_confirmed(ext_ip, hostname)
+    if ignored:
+        return False, f"hostname {hostname} is in ignore-domains.txt (address confirmed by DNS)", ""
     if time.time() - _last_emailed[ext_ip] < EMAIL_COOLDOWN:
-        return False, "already emailed about this address recently"
-    return True, ""
+        return False, "already emailed about this address recently", warning
+    return True, "", warning
 
 
 def handle_alert(event):
@@ -663,7 +716,17 @@ def handle_alert(event):
 
     severity = a.get("severity", 3)
     high = bool(abuse) and abuse["confidence"] >= ABUSEIPDB_THRESHOLD
-    ignored_peer = bool(ext_ip) and (ip_ignored(ext_ip) or domain_ignored(hostname))
+    # ignore-ips.txt silences everything. ignore-domains.txt (only when DNS confirms the
+    # address) silences AbuseIPDB-reputation emails, but never a severity 1-2 rule match.
+    ip_quiet = bool(ext_ip) and ip_ignored(ext_ip)
+    dom_quiet, dom_warning = (domain_ignored_confirmed(ext_ip, hostname) if ext_ip and not ip_quiet
+                              else (False, ""))
+    if dom_warning:
+        facts += "\n" + dom_warning
+        log(f"    -> {dom_warning}")
+    ignored_peer = ip_quiet or (dom_quiet and severity > 2)
+    if dom_quiet and severity <= 2:
+        high = False                             # reputation part ignored; the rule match still counts
 
     # The NPU runs one request at a time and is shared with Open WebUI, so the AI is only
     # asked about events that will be emailed. Low-severity alerts are logged without it.
@@ -679,7 +742,7 @@ def handle_alert(event):
     if ignored_peer:
         log("    -> Ignored address/domain. Logged only.")
     elif high:
-        ok, why = urgent_or_ignored(ext_ip, hostname, abuse)
+        ok, why, _ = urgent_or_ignored(ext_ip, hostname, abuse)   # warning already added above
         if ok:
             _last_emailed[ext_ip] = now
             send_email(f"[URGENT] [THREAT {abuse['confidence']}%] {sig}",
@@ -692,6 +755,8 @@ def handle_alert(event):
 
 
 def handle_flow(event):
+    # This connection's own hostname if Suricata saw one; otherwise the last one seen for the address.
+    own_name = _flow_hostname.pop(event.get("flow_id"), None)
     ext_ip, home_ip, direction = pick_sides(event)
     if not ext_ip:
         return
@@ -699,14 +764,18 @@ def handle_flow(event):
     if not abuse or abuse["confidence"] < ABUSEIPDB_THRESHOLD:
         return                                   # unknown or not bad - the common case
 
-    hostname = _ip_hostname.get(ext_ip)
-    ok, why = urgent_or_ignored(ext_ip, hostname, abuse)
+    hostname = own_name or _ip_hostname.get(ext_ip)
+    ok, why, warning = urgent_or_ignored(ext_ip, hostname, abuse)
+    if warning:
+        log(f"    -> {ext_ip}: {warning}")
     if not ok:
         return
     _last_emailed[ext_ip] = time.time()
     log(f"[!] Traffic with known-bad address {RED}{ext_ip} ({abuse['confidence']}%, {abuse['isp']}){RESET} "
         f"<-> {device_name(home_ip)}")
     facts = describe(event, ext_ip, home_ip, direction, abuse, hostname)
+    if warning:
+        facts += "\n" + warning
     summary = query_llm(build_prompt(facts)) or fallback_text(ext_ip, home_ip, abuse)
     header = f"Known malicious address {ext_ip} ({abuse['confidence']}%)"
     write_triage(header, f"{event.get('src_ip', '?')}:{event.get('src_port', '?')} -> "
@@ -723,6 +792,36 @@ def remember_hostname(event):
         if len(_ip_hostname) > 20000:
             _ip_hostname.clear()
         _ip_hostname[ip] = name
+        fid = event.get("flow_id")
+        if fid is not None:
+            if len(_flow_hostname) > 20000:
+                _flow_hostname.clear()
+            _flow_hostname[fid] = name
+
+
+def remember_dns(event):
+    """Record name -> address answers that a trusted DNS server gave a home device."""
+    d = event.get("dns", {})
+    if d.get("type") != "answer" or event.get("dest_ip") not in TRUSTED_DNS:
+        return
+    answers = d.get("answers") or []
+    names = {str(d.get("rrname", "")).lower().strip(".")}
+    addrs = []
+    for ans in answers:
+        names.add(str(ans.get("rrname", "")).lower().strip("."))
+        if ans.get("rrtype") == "CNAME":
+            names.add(str(ans.get("rdata", "")).lower().strip("."))
+        elif ans.get("rrtype") in ("A", "AAAA") and is_internet_ip(ans.get("rdata", "")):
+            addrs.append(ans["rdata"])
+    names.discard("")
+    if not addrs:
+        return
+    if len(_dns_names) > DNS_MEMORY_MAX:
+        _dns_names.clear()
+    for ip in addrs:
+        known = _dns_names.setdefault(ip, set())
+        if len(known) < 200:                      # shared CDN addresses serve many names
+            known.update(names)
 
 
 def handle_line(line):
@@ -736,6 +835,8 @@ def handle_line(line):
     kind = event.get("event_type")
     if kind in ("tls", "http"):
         remember_hostname(event)
+    elif kind == "dns":
+        remember_dns(event)
     elif kind == "alert":
         handle_alert(event)
     elif kind == "flow":
