@@ -1,0 +1,18 @@
+[Unit]
+Description=FoxHole health checks (NAS, Minecraft server, Pi-hole blocks) for Grafana
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/foxhole/foxhole_health.py
+TimeoutStartSec=50
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+# node-exporter textfile dir and Pi-hole's database folder (SQLite needs its
+# -shm file writable even for read-only access in WAL mode).
+# StateDirectory creates /var/lib/foxhole-health and makes it writable.
+ReadWritePaths=/var/lib/prometheus/node-exporter /etc/pihole
+StateDirectory=foxhole-health

@@ -47,6 +47,7 @@ Example devices used throughout the files:
 | Chat | Open WebUI on port 8081. |
 | Dashboards | Grafana on port 3000, Prometheus on 9090, logs in Loki. |
 | NAS | Samba share on the LAN side only. |
+| Health checks | `foxhole_health.py` runs every minute and feeds the SOC dashboard's NAS and Minecraft tiles and its Pi-hole blocks chart. |
 | Backups | `foxhole-backup` writes a weekly settings + data archive to the NAS and keeps the newest 8. |
 
 ### Email alerts
@@ -85,6 +86,8 @@ Everything is in [`pi/`](pi/). The setup scripts expect this folder copied to `/
 | `dashboard-internet` | `/usr/local/sbin/` | `on` / `off` / `status` switch for DashboardPC's internet |
 | `011_foxhole-scoped` | `/etc/sudoers.d/` | Limited passwordless sudo |
 | `foxhole-rules-update.service` / `.timer` | `/etc/systemd/system/` | Nightly Suricata rule update (installed by `setup-suricata.sh`) |
+| `foxhole_health.py` | `/usr/local/lib/foxhole/` | NAS, Minecraft and Pi-hole checks for Grafana (node-exporter textfile metrics) |
+| `foxhole-health.service` / `.timer` | `/etc/systemd/system/` | Runs the health checks every minute |
 | `foxhole-backup` | `/usr/local/sbin/` | Settings + data backup to the NAS |
 | `foxhole-backup.service` / `.timer` | `/etc/systemd/system/` | Runs the backup weekly (Sunday ~05:30) |
 | `setup-suricata.sh` | run once | Configures Suricata for inline mode |
@@ -112,7 +115,7 @@ There is no single settings file yet. If you change an address or a device, chan
 | LAN network (10.0.0.0/24) | `foxhole_triage.py` (`HOME_NET`), `setup-suricata.sh` (`HOME_NET`), Pi-hole DHCP settings |
 | Router / Wi-Fi network (192.168.0.0/24) | `nftables.conf` (`WIFI_NET`), `local.rules` |
 | AdminPC (10.0.0.2) | `nftables.conf` (`LAPTOP`), `foxhole_triage.py` (`DEVICES`, `AUTOBLOCK_EXEMPT_IPS`), Pi-hole DHCP settings |
-| GameServer (10.0.0.18) | `nftables.conf` (`GAMESRV`), `local.rules`, `foxhole_triage.py` (`DEVICES`), Pi-hole DHCP settings |
+| GameServer (10.0.0.18) | `nftables.conf` (`GAMESRV`), `local.rules`, `foxhole_triage.py` (`DEVICES`), `foxhole_health.py` (`MC_HOST`), Pi-hole DHCP settings |
 | DashboardPC (10.0.0.20) | `nftables.conf` (`DASH`), `dashboard-internet`, `foxhole_triage.py` (`DEVICES`), Pi-hole DHCP settings |
 | Pi login name | `011_foxhole-scoped`, `setup-triage.sh`, `foxhole-backup`, the `hailo-ollama` service file |
 
@@ -128,6 +131,7 @@ Moving these into one file is a welcome contribution; see [CONTRIBUTING.md](CONT
 | Send a test email | See step 11 of [INSTALL.md](INSTALL.md) |
 | Reload Suricata rules | `sudo systemctl reload suricata` |
 | Update Suricata rules now (also runs nightly) | `sudo systemctl start foxhole-rules-update` |
+| Run the health checks now (also runs every minute) | `sudo systemctl start foxhole-health` |
 | Back up to the NAS now (also runs weekly) | `sudo systemctl start foxhole-backup` |
 | Unblock an address | `sudo nft delete element inet filter BLOCKED_IPS { ADDRESS }` |
 

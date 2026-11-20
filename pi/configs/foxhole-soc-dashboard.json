@@ -5,67 +5,683 @@
   "schemaVersion": 39,
   "editable": true,
   "refresh": "30s",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "panels": [
-    {
-      "id": 1,
-      "title": "Suricata Events - Pi",
-      "type": "logs",
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
-          "expr": "{job=\"suricata\", host=\"pi\"}"
-        }
-      ],
-      "options": { "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true, "enableLogDetails": true }
-    },
     {
       "id": 2,
       "title": "Suricata Severity-1 Alerts - Pi",
       "type": "logs",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "expr": "{job=\"suricata\", host=\"pi\"} | json | alert_severity=\"1\""
         }
       ],
-      "options": { "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true, "enableLogDetails": true }
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      }
     },
     {
-      "id": 3,
-      "title": "Fail2ban Events - Pi",
-      "type": "logs",
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 10 },
-      "datasource": { "type": "loki", "uid": "loki" },
+      "id": 5,
+      "title": "Suricata Alerts over Time (by severity)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "interval": "5m",
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
-          "expr": "{job=\"fail2ban\", host=\"pi\"}"
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "legendFormat": "Severity {{alert_severity}}",
+          "expr": "sum by (alert_severity) (count_over_time({job=\"suricata\", host=\"pi\"} |= `\"event_type\":\"alert\"` | json | event_type=\"alert\" [$__interval]))"
         }
       ],
-      "options": { "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true, "enableLogDetails": true }
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "axisSoftMin": 0
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Severity 1"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Severity 2"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Severity 3"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Pi-hole Blocked Queries over Time",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "interval": "5m",
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "Blocked queries",
+          "expr": "round(increase(foxhole_pihole_blocked_total[$__interval]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "axisSoftMin": 0
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "NAS & Minecraft Health",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "foxhole_nas_mounted",
+          "legendFormat": "NAS disk",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "foxhole_nas_smb_up",
+          "legendFormat": "NAS file sharing",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "100 * foxhole_nas_avail_bytes / foxhole_nas_size_bytes",
+          "legendFormat": "NAS free space",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "time() - foxhole_nas_last_backup_timestamp_seconds",
+          "legendFormat": "Last backup",
+          "instant": true
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "foxhole_minecraft_host_up",
+          "legendFormat": "GameServer PC",
+          "instant": true
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "foxhole_minecraft_up",
+          "legendFormat": "Minecraft server",
+          "instant": true
+        },
+        {
+          "refId": "G",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "foxhole_minecraft_players_online",
+          "legendFormat": "Players online",
+          "instant": true
+        },
+        {
+          "refId": "H",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "foxhole_minecraft_response_seconds * 1000",
+          "legendFormat": "Minecraft response",
+          "instant": true
+        },
+        {
+          "refId": "I",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "time() - foxhole_health_last_run_timestamp_seconds",
+          "legendFormat": "Last checked",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "orientation": "vertical",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "-",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Mounted",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "0": {
+                        "text": "NOT MOUNTED",
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Up",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "0": {
+                        "text": "DOWN",
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 10
+                    },
+                    {
+                      "color": "green",
+                      "value": 20
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "D"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 691200
+                    },
+                    {
+                      "color": "red",
+                      "value": 1296000
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "E"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Online",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "0": {
+                        "text": "OFFLINE",
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "F"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Up",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "0": {
+                        "text": "DOWN",
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "H"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 100
+                    },
+                    {
+                      "color": "red",
+                      "value": 500
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "I"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 180
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 1,
+      "title": "Suricata Events - Pi",
+      "type": "logs",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"suricata\", host=\"pi\"}"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      }
     },
     {
       "id": 4,
       "title": "SSH Auth - Pi (journal)",
       "type": "logs",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 10 },
-      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "expr": "{job=\"sshd\", host=\"pi\"}"
         }
       ],
-      "options": { "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true, "enableLogDetails": true }
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 3,
+      "title": "Fail2ban Events - Pi",
+      "type": "logs",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"fail2ban\", host=\"pi\"}"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      }
     }
   ]
 }

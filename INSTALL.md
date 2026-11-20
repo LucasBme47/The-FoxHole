@@ -276,7 +276,26 @@ Archives go to `/mnt/nas/FoxHole-Backups/`, with a `.sha256` file next to each o
 - **The archives contain secrets** (`/etc/suricata-triage.env`, password hashes, SSH host keys). On an NTFS disk, file permissions cannot protect them.
 - The NAS disk hangs off the same Pi. Copy an archive to another computer now and then.
 
-## 16. Move the computers behind the Pi
+## 16. Optional: health checks for the dashboard
+
+The FoxHole SOC dashboard's NAS and Minecraft tiles and its Pi-hole blocks chart come from `foxhole_health.py`. It runs every minute and writes `/var/lib/prometheus/node-exporter/foxhole_health.prom`, which node-exporter publishes to Prometheus. Set `MC_HOST` / `MC_PORT` (and `NAS_MOUNT` if yours differs) at the top of the script first.
+
+```bash
+python3 -m py_compile /tmp/foxhole/foxhole_health.py       # syntax check; prints nothing when it is fine
+sudo install -m 755 -o root -g root /tmp/foxhole/foxhole_health.py /usr/local/lib/foxhole/foxhole_health.py
+sudo install -m 644 /tmp/foxhole/foxhole-health.service /tmp/foxhole/foxhole-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now foxhole-health.timer
+grep -v '^#' /var/lib/prometheus/node-exporter/foxhole_health.prom
+```
+
+Notes:
+
+- Pi-hole v6's own "blocked today" number is a rolling 24-hour total, so it cannot show blocks per time period. The script instead counts blocked rows in Pi-hole's query database (opened read-only) and keeps a running total in `/var/lib/foxhole-health/state.json`. The chart starts at zero when the script is installed.
+- The Minecraft check sends the same status request the game's server list sends; it does not log in.
+- If the "Last checked" tile turns red, the timer has stopped: `systemctl status foxhole-health.timer`.
+
+## 17. Move the computers behind the Pi
 
 Plug the switch into the Pi's USB Ethernet adapter and restart each computer's network connection so it picks up an address from Pi-hole.
 
