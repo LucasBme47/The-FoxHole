@@ -227,6 +227,40 @@ def device_name(ip):
     return ip
 
 
+DEFENDER_SIG_ID = 2021076               # ET HUNTING SUSPICIOUS Dotted Quad Host MZ Response
+DEFENDER_UA_PREFIX = "microsoft-delivery-optimization/"
+DEFENDER_PATH_PREFIX = "/c/msdownload/update/software/defu/"
+DEFENDER_ORIGIN = ".windowsupdate.com"
+
+
+def is_defender_update(event):
+    """True for a Windows Defender definition download from an ISP-hosted Microsoft cache.
+    Windows Delivery Optimization fetches these by bare IP, which trips rule 2021076.
+    All of these must hold: that exact rule; a home device started the connection;
+    Microsoft's downloader user agent; the Defender definitions path; and the request
+    names windowsupdate.com as the origin. The user agent and URL are chosen by the
+    client, so the caller still emails if AbuseIPDB rates the address as bad."""
+    if event.get("alert", {}).get("signature_id") != DEFENDER_SIG_ID:
+        return False
+    flow_src = event.get("flow", {}).get("src_ip", "")
+    try:
+        if ipaddress.ip_address(flow_src) not in HOME_NET:
+            return False
+    except ValueError:
+        return False
+    http = event.get("http", {})
+    ua = (http.get("http_user_agent") or "").lower()
+    path, _, query = (http.get("url") or "").partition("?")
+    if not ua.startswith(DEFENDER_UA_PREFIX) or not path.lower().startswith(DEFENDER_PATH_PREFIX):
+        return False
+    for part in query.split("&"):
+        key, _, value = part.partition("=")
+        if key == "cacheHostOrigin":
+            host = value.lower().strip(".")
+            return host.endswith(DEFENDER_ORIGIN) or host == DEFENDER_ORIGIN.lstrip(".")
+    return False
+
+
 def pick_sides(event):
     """Return (internet_ip, home_ip, direction_text) for an eve event."""
     src, dst = event.get("src_ip", ""), event.get("dest_ip", "")
@@ -703,6 +737,14 @@ def handle_alert(event):
     if abuse:
         hot = abuse["confidence"] >= ABUSEIPDB_THRESHOLD
         log(f"    -> AbuseIPDB: {RED if hot else ''}{abuse['confidence']}% ({abuse['isp']}){RESET if hot else ''}")
+
+    if is_defender_update(event) and not (abuse and abuse["confidence"] >= ABUSEIPDB_THRESHOLD):
+        log("    -> Ignored (Windows Defender update from a Microsoft cache server). Logged only.")
+        write_triage(sig, f"{event.get('src_ip', '?')}:{event.get('src_port', '?')} -> "
+                          f"{event.get('dest_ip', '?')}:{event.get('dest_port', '?')}",
+                     "Windows Defender definition update via Microsoft Delivery Optimization "
+                     f"(URL {event.get('http', {}).get('url', '?')}). Not emailed.")
+        return
 
     if not ext_ip:
         # Neither side is an internet address (e.g. traffic to the router-side 192.168.0.x network)
