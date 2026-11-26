@@ -19,3 +19,13 @@ ET INFO Session Traversal Utilities for NAT (STUN Binding Request On Non-Standar
 ET INFO Dropbox.com Offsite File Backup in Use
 ET USER_AGENTS Steam HTTP Client User-Agent
 ET INFO Packed Executable Download
+
+# --- "What is my public IP" lookups to ipify / ipinfo, made by remote-management and
+#     work tools. Matches 9 ET INFO rules only; the HUNTING rules (myipinfo adware,
+#     ipify via WinHTTP) are NOT silenced. Applies to every computer; the AbuseIPDB
+#     check on the connection still runs. Remove these lines if nothing of yours does this.
+(ipify .org)
+api.ipify.org
+ipinfo.io
+(ipinfo .io)
+(ipinfo. io)

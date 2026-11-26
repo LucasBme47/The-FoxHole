@@ -76,7 +76,9 @@ install -m 644 "$C/pihole-exporter.service" /etc/systemd/system/pihole-exporter.
 
 echo "== journald cap =="
 mkdir -p /etc/systemd/journald.conf.d
-printf '[Journal]\nSystemMaxUse=300M\n' > /etc/systemd/journald.conf.d/foxhole.conf
+# Storage=persistent: Raspberry Pi OS packages ship 40-rpi-volatile-storage.conf (journal in RAM
+# only, lost at every reboot). This file sorts after it, so it wins.
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=300M\n' > /etc/systemd/journald.conf.d/foxhole.conf
 systemctl restart systemd-journald
 
 echo "== start services =="

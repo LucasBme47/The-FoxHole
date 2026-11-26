@@ -52,11 +52,13 @@ Example devices used throughout the files:
 
 ### Email alerts
 
-- `[URGENT] [THREAT n%]`: a device exchanged traffic with an address AbuseIPDB rates 80% or higher. Includes an AI summary and fixed remediation steps.
+- `[URGENT] [THREAT n%]`: a device exchanged traffic with an address AbuseIPDB rates 80% or higher.
 - `[SURICATA SevN]`: a Suricata alert of severity 1 or 2.
 - `[AUTOBLOCK]`: repeated SSH attempts; the source is blocked for 30 minutes.
 
-The remediation steps are fixed text, not AI-written, because a 1.5B model is not reliable enough to invent them.
+Alert emails are short. The subject names the device and the site (for example `[SURICATA Sev2] AdminPC -> ipinfo.io`); the body has the connection, the rule, the AbuseIPDB score, a one-sentence AI note, one next step, the command to block the address and its AbuseIPDB link.
+
+The next step is fixed text, not AI-written, because a 1.5B model is not reliable enough to invent it. The model also tends to call ordinary traffic an attack, so when its note uses words like "malicious" or "compromised" but AbuseIPDB does not rate the address as bad, the note is left out of the email (it stays in `triage.log`).
 
 ### Staying inside AbuseIPDB's free plan
 

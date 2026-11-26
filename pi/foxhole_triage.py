@@ -28,6 +28,7 @@ Secrets come from /etc/suricata-triage.env (SMTP_USER, SMTP_PASS, ALERT_EMAIL, A
 import ipaddress
 import json
 import os
+import re
 import smtplib
 import socket
 import subprocess
@@ -49,6 +50,12 @@ CONF_DIR = "/etc/foxhole"
 OLLAMA_URL = "http://127.0.0.1:8001/api/chat"   # via the FoxHole LLM relay (takes turns on the NPU)
 MODEL = os.environ.get("FOXHOLE_MODEL", "qwen2.5-instruct:1.5b")
 QUERY_TIMEOUT = 300
+AI_MAX_WORDS = 25               # emails carry a one-sentence AI note (the model is small and can be wrong)
+AI_MAX_CHARS = 200
+# The 1.5B model often calls ordinary traffic an attack. When AbuseIPDB does NOT rate the
+# address as bad, an AI note using these words is left out of the email (still in triage.log).
+AI_ALARM_WORDS = re.compile(r"malicious|compromis|breach|infect|attack|hack|reconnaissance|"
+                            r"exfiltrat|malware|intrusion|suspicious", re.I)
 
 SMTP_USER = os.environ["SMTP_USER"]
 SMTP_PASS = os.environ["SMTP_PASS"]
@@ -529,11 +536,14 @@ def query_llm(prompt):
     except Exception as e:
         log(f"    -> [LLM ERROR: {e}]")
         return None
-    # A 1.5B model sometimes adds markdown or rambles: tidy and cap it.
+    # A 1.5B model sometimes adds markdown or rambles: tidy it and keep the first sentence only.
     text = " ".join(text.replace("*", "").replace("#", "").split())
-    if len(text) > 700:
-        cut = text[:700]
-        text = cut[:cut.rfind(".") + 1] if "." in cut else cut
+    end = text.find(". ", 20)
+    if end != -1:
+        text = text[:end + 1]
+    if len(text) > AI_MAX_CHARS:
+        cut = text[:AI_MAX_CHARS]
+        text = cut[:cut.rfind(" ")] + "..." if " " in cut else cut
     return text or None
 
 
@@ -570,43 +580,79 @@ def describe(event, ext_ip, home_ip, direction, abuse, hostname):
 
 def build_prompt(facts):
     return (
-        "You are a SOC analyst triage assistant for a home network. Summarize this event "
-        "in 2-3 sentences for the network owner: what happened, which home device was involved, "
-        "and the likely threat. Use only the facts given. "
-        "Plain text only - no markdown, no bullet points, no bold or asterisks.\n\n"
+        "You are a SOC analyst triage assistant for a home network. In ONE short sentence "
+        f"(at most {AI_MAX_WORDS} words), say what happened and which home device was involved. "
+        "Use only the facts given. Do not call a device malicious, infected or compromised "
+        "unless the facts say so. Plain text only - no markdown, no lists.\n\n"
         + facts + "\n"
     )
 
 
-def fallback_text(ext_ip, home_ip, abuse):
-    """Used when the LLM is unavailable - the email must still be useful."""
-    conf = abuse["confidence"] if abuse else 0
-    return (
-        f"{device_name(home_ip)} exchanged traffic with {ext_ip}"
-        + (f", which AbuseIPDB rates {conf}% likely malicious." if abuse else ".")
-        + " (The on-device AI summary was unavailable, so this is a standard message.)"
-    )
+def short_name(ip):
+    """'AdminPC' instead of 'AdminPC (management laptop) [10.0.0.2]', for short emails."""
+    if ip in DEVICES:
+        return DEVICES[ip].split(" (")[0]
+    return f"unknown device {ip}"
 
 
-def remediation_steps(ext_ip, home_ip, direction, abuse, urgent):
-    """Fixed, accurate next steps. The small on-device model is not trusted to invent these."""
-    dev = DEVICES.get(home_ip, f"the device at {home_ip}")
+def event_time(event):
+    ts = event.get("timestamp", "")
+    try:
+        return datetime.fromisoformat(ts).strftime("%a %H:%M")
+    except ValueError:
+        return ts[:16] or "?"
+
+
+def next_step(home_ip, direction, urgent):
+    """One fixed, accurate next step. The small on-device model is not trusted to invent these."""
     if not urgent:
-        return ("1. No immediate action needed unless this keeps repeating or you do not recognise the activity.\n"
-                "2. If it is normal for your network, add the rule name to /etc/foxhole/ignore-signatures.txt.")
-    steps = []
-    if direction.startswith("home device"):
-        steps.append(f"1. Go to {dev} and find out what was talking to {ext_ip} "
-                     f"(a game server, a browser tab, a download?). Close it if nobody expected it.")
-        steps.append(f"2. Run a full malware scan on {dev} and check for recently installed programs or browser extensions.")
+        return ("Next: fine if you recognise it. If it is normal and keeps coming, add the rule name "
+                "to /etc/foxhole/ignore-signatures.txt.")
+    if direction.startswith("internet"):
+        return ("Next: nothing from the internet should start a connection in - check the router "
+                "has no port forwarding rules.")
+    return (f"Next: find what on {short_name(home_ip)} talked to this address; if nobody expected it, "
+            "run a malware scan.")
+
+
+def short_email(event, ext_ip, home_ip, direction, abuse, hostname, summary, urgent, warning=""):
+    """(subject_tail, body) for a compact alert email. ext_ip may be a local (non-internet)
+    peer when neither side was on the internet."""
+    a = event.get("alert", {})
+    dev = f"{short_name(home_ip)} ({home_ip})"
+    peer = hostname or ext_ip
+    inbound = direction.startswith("internet")
+    local = not is_internet_ip(ext_ip)
+    proto = event.get("app_proto") or str(event.get("proto", "?")).lower()
+    if local:
+        tail = f"{short_name(home_ip)} <-> {peer}"
+        lines = [f"{dev} <-> {peer} (local network, not the internet)",
+                 f"  {proto}, {event_time(event)}"]
+    elif inbound:
+        tail = f"{peer} -> {short_name(home_ip)}"
+        lines = [f"{peer} -> {dev}",
+                 f"  {ext_ip} to port {event.get('dest_port', '?')} {proto}, {event_time(event)}"]
     else:
-        steps.append(f"1. {ext_ip} tried to reach {dev}. Nothing from the internet should be able to start a "
-                     f"connection into the home network: check the router has no port forwarding rules.")
-        steps.append(f"2. Check {dev} for services listening that should not be (remote desktop, game servers, file sharing).")
-    steps.append(f"3. Block the address on the Pi for 30 minutes while you look into it:\n"
-                 f"   sudo nft add element inet filter BLOCKED_IPS {{ {ext_ip} timeout 30m }}")
-    steps.append("4. If the device also shows other alerts, unplug its network cable until it has been checked.")
-    return "\n".join(steps)
+        tail = f"{short_name(home_ip)} -> {peer}"
+        lines = [f"{dev} -> {peer}",
+                 f"  {ext_ip}:{event.get('dest_port', '?')} {proto}, {event_time(event)}"]
+    if a:
+        lines.append(f"Rule:      {a.get('signature', '?')}, Sev{a.get('severity', '?')}")
+    if abuse:
+        lines.append(f"AbuseIPDB: {abuse['confidence']}% ({abuse['isp']}, {abuse['country']})"
+                     + ("; on the worst-10,000 list" if abuse.get("listed") else ""))
+    elif not local:
+        lines.append("AbuseIPDB: not checked (daily lookups used up)")
+    if summary:
+        lines.append(f"AI:        {summary}")
+    if warning:
+        lines.append(f"Note:      {hostname} is on the ignore list, but DNS does not confirm it belongs "
+                     f"to {ext_ip} (possibly faked), so this was not ignored.")
+    lines += ["", next_step(home_ip, direction, urgent)]
+    if not local:
+        lines += [f"Block 30 min: sudo nft add element inet filter BLOCKED_IPS {{ {ext_ip} timeout 30m }}",
+                  f"https://www.abuseipdb.com/check/{ext_ip}"]
+    return tail, "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- outputs
@@ -636,22 +682,6 @@ def send_email(subject, body):
     except Exception as e:
         log(f"    -> [EMAIL ERROR: {e}]")
         return False
-
-
-def email_body(facts, summary, steps, ext_ip):
-    return (
-        f"--- AI SUMMARY ({MODEL}, running on the Pi; may be imprecise) ---\n"
-        f"{summary}\n"
-        f"\n--- EVENT FACTS ---\n"
-        f"{facts}\n"
-        f"\n--- SUGGESTED REMEDIATION ---\n"
-        f"{steps}\n"
-        f"\n--- REFERENCE ---\n"
-        f"Remove a block:   sudo nft delete element inet filter BLOCKED_IPS {{ {ext_ip} }}\n"
-        f"AbuseIPDB page:   https://www.abuseipdb.com/check/{ext_ip}\n"
-        f"If this is known-good, add it to /etc/foxhole/ignore-ips.txt or ignore-domains.txt\n"
-        f"on the Pi and run: sudo systemctl restart foxhole-triage\n"
-    )
 
 
 # --------------------------------------------------------------------------- SSH auto-block
@@ -691,14 +721,10 @@ def handle_ssh(event, sig):
                          f"{SSH_BRUTEFORCE_WINDOW}s. Blocked for {AUTOBLOCK_DURATION // 60} minutes. Trigger: {sig}")
             send_email(
                 f"[AUTOBLOCK] SSH Brute Force - {src_ip}",
-                "AUTOMATED RESPONSE: IP BLOCKED\n================================\n"
-                f"BLOCKED IP:   {device_name(src_ip)}\n"
-                f"BLOCK TIME:   {datetime.now().isoformat()}\n"
-                f"DURATION:     {AUTOBLOCK_DURATION // 60} minutes (expires by itself)\n"
-                f"TRIGGER RULE: {sig}\n"
-                f"TARGET HOST:  {event.get('dest_ip', '?')}:{event.get('dest_port', '?')}\n"
-                f"\nTo unblock now: sudo nft delete element inet filter BLOCKED_IPS {{ {src_ip} }}\n"
-                f"To list blocks: sudo nft list set inet filter BLOCKED_IPS\n")
+                f"{device_name(src_ip)} blocked for {AUTOBLOCK_DURATION // 60} min (expires by itself).\n"
+                f"Target:  {event.get('dest_ip', '?')}:{event.get('dest_port', '?')}, {event_time(event)}\n"
+                f"Rule:    {sig}\n"
+                f"\nUnblock now: sudo nft delete element inet filter BLOCKED_IPS {{ {src_ip} }}\n")
 
 
 # --------------------------------------------------------------------------- event handlers
@@ -746,6 +772,7 @@ def handle_alert(event):
                      f"(URL {event.get('http', {}).get('url', '?')}). Not emailed.")
         return
 
+    peer = ext_ip
     if not ext_ip:
         # Neither side is an internet address (e.g. traffic to the router-side 192.168.0.x network)
         src, dst = event.get("src_ip", "?"), event.get("dest_ip", "?")
@@ -764,7 +791,6 @@ def handle_alert(event):
     dom_quiet, dom_warning = (domain_ignored_confirmed(ext_ip, hostname) if ext_ip and not ip_quiet
                               else (False, ""))
     if dom_warning:
-        facts += "\n" + dom_warning
         log(f"    -> {dom_warning}")
     ignored_peer = ip_quiet or (dom_quiet and severity > 2)
     if dom_quiet and severity <= 2:
@@ -772,27 +798,35 @@ def handle_alert(event):
 
     # The NPU runs one request at a time and is shared with Open WebUI, so the AI is only
     # asked about events that will be emailed. Low-severity alerts are logged without it.
+    summary = None
     if (high or severity <= 2) and not ignored_peer:
-        summary = query_llm(build_prompt(facts)) or fallback_text(ext_ip or "?", home_ip or "?", abuse)
+        summary = query_llm(build_prompt(facts))
+        log_summary = summary or "(AI summary unavailable)"
+        if summary and not high and AI_ALARM_WORDS.search(summary):
+            log("    -> AI note not emailed: alarm words, but AbuseIPDB does not rate the address as bad.")
+            log_summary += " [not emailed: alarm words without a bad AbuseIPDB score]"
+            summary = None
     else:
-        summary = ("Low severity and not a known-bad address - logged only, not sent to the AI."
-                   + (f" AbuseIPDB score {abuse['confidence']}%." if abuse else ""))
+        log_summary = ("Low severity and not a known-bad address - logged only, not sent to the AI."
+                       + (f" AbuseIPDB score {abuse['confidence']}%." if abuse else ""))
     write_triage(sig, f"{event.get('src_ip', '?')}:{event.get('src_port', '?')} -> "
-                      f"{event.get('dest_ip', '?')}:{event.get('dest_port', '?')}", summary)
+                      f"{event.get('dest_ip', '?')}:{event.get('dest_port', '?')}", log_summary)
 
-    steps = remediation_steps(ext_ip or "?", home_ip or "?", direction, abuse, urgent=high or severity <= 2)
     if ignored_peer:
         log("    -> Ignored address/domain. Logged only.")
     elif high:
-        ok, why, _ = urgent_or_ignored(ext_ip, hostname, abuse)   # warning already added above
+        ok, why, _ = urgent_or_ignored(ext_ip, hostname, abuse)   # warning already known above
         if ok:
             _last_emailed[ext_ip] = now
-            send_email(f"[URGENT] [THREAT {abuse['confidence']}%] {sig}",
-                       email_body(facts, summary, steps, ext_ip))
+            tail, body = short_email(event, ext_ip, home_ip, direction, abuse, hostname, summary,
+                                     urgent=True, warning=dom_warning)
+            send_email(f"[URGENT] [THREAT {abuse['confidence']}%] {tail}", body)
         else:
             log(f"    -> Not emailed: {why}")
     elif severity <= 2:
-        send_email(f"[SURICATA Sev{severity}] {sig}", email_body(facts, summary, steps, ext_ip or "?"))
+        tail, body = short_email(event, peer or "?", home_ip or "?", direction, abuse, hostname, summary,
+                                 urgent=False, warning=dom_warning)
+        send_email(f"[SURICATA Sev{severity}] {tail}", body)
     log("    -> Summary written.")
 
 
@@ -816,15 +850,14 @@ def handle_flow(event):
     log(f"[!] Traffic with known-bad address {RED}{ext_ip} ({abuse['confidence']}%, {abuse['isp']}){RESET} "
         f"<-> {device_name(home_ip)}")
     facts = describe(event, ext_ip, home_ip, direction, abuse, hostname)
-    if warning:
-        facts += "\n" + warning
-    summary = query_llm(build_prompt(facts)) or fallback_text(ext_ip, home_ip, abuse)
+    summary = query_llm(build_prompt(facts))
     header = f"Known malicious address {ext_ip} ({abuse['confidence']}%)"
     write_triage(header, f"{event.get('src_ip', '?')}:{event.get('src_port', '?')} -> "
-                         f"{event.get('dest_ip', '?')}:{event.get('dest_port', '?')}", summary)
-    steps = remediation_steps(ext_ip, home_ip, direction, abuse, urgent=True)
-    send_email(f"[URGENT] [THREAT {abuse['confidence']}%] {device_name(home_ip)} <-> {ext_ip}",
-               email_body(facts, summary, steps, ext_ip))
+                         f"{event.get('dest_ip', '?')}:{event.get('dest_port', '?')}",
+                 summary or "(AI summary unavailable)")
+    tail, body = short_email(event, ext_ip, home_ip, direction, abuse, hostname, summary,
+                             urgent=True, warning=warning)
+    send_email(f"[URGENT] [THREAT {abuse['confidence']}%] {tail}", body)
 
 
 def remember_hostname(event):

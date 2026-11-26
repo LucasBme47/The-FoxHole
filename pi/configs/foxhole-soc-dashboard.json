@@ -213,7 +213,7 @@
     },
     {
       "id": 7,
-      "title": "NAS & Minecraft Health",
+      "title": "NAS, Minecraft & Pi Health",
       "type": "stat",
       "gridPos": {
         "h": 6,
@@ -302,8 +302,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "foxhole_minecraft_response_seconds * 1000",
-          "legendFormat": "Minecraft response",
+          "expr": "node_thermal_zone_temp{type=\"cpu-thermal\"}",
+          "legendFormat": "Pi Temperature",
           "instant": true
         },
         {
@@ -535,7 +535,11 @@
             "properties": [
               {
                 "id": "unit",
-                "value": "ms"
+                "value": "celsius"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               },
               {
                 "id": "thresholds",
@@ -548,11 +552,11 @@
                     },
                     {
                       "color": "orange",
-                      "value": 100
+                      "value": 70
                     },
                     {
                       "color": "red",
-                      "value": 500
+                      "value": 80
                     }
                   ]
                 }
